@@ -2,12 +2,15 @@ package clients
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/nuomiiiii/lite/database/billing"
 	"github.com/nuomiiiii/lite/database/models"
+	"github.com/nuomiiiii/lite/pkg/expiry"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
@@ -558,4 +561,325 @@ func TestSaveClientNormalizesBandwidth(t *testing.T) {
 	var second models.Client
 	require.NoError(t, db.Where("uuid = ?", "n1").First(&second).Error)
 	assert.Equal(t, "200 Mbps", second.Bandwidth)
+}
+
+func TestSaveClientParsesExpiryLocalDateTimeInNamedZone(t *testing.T) {
+	db := newClientTestDB(t, "expiry-local-datetime")
+	require.NoError(t, db.Create(&models.Client{
+		UUID: "n1", Token: "token-n1", Name: "N",
+	}).Error)
+
+	require.NoError(t, saveClient(db, map[string]interface{}{
+		"uuid":                   "n1",
+		"expiry_timezone":        "America/New_York",
+		"expiry_local_datetime":  "2026-10-01T09:30:45",
+	}))
+	var client models.Client
+	require.NoError(t, db.Where("uuid = ?", "n1").First(&client).Error)
+	assert.Equal(t, "America/New_York", client.ExpiryTimezone)
+	loc, err := time.LoadLocation("America/New_York")
+	require.NoError(t, err)
+	want := time.Date(2026, 10, 1, 9, 30, 45, 0, loc).UTC()
+	require.NotNil(t, client.ExpiredAt)
+	assert.True(t, client.ExpiredAt.UTC().Equal(want), "got %s want %s", client.ExpiredAt.UTC(), want)
+
+	err = saveClient(db, map[string]interface{}{
+		"uuid":                  "n1",
+		"expired_at":            want.Format(time.RFC3339),
+		"expiry_local_datetime": "2026-10-01T09:30:45",
+	})
+	require.Error(t, err)
+
+	require.NoError(t, saveClient(db, map[string]interface{}{
+		"uuid":       "n1",
+		"expired_at": want.Add(time.Hour).UTC(),
+		"_match_expired_at": want.UTC(),
+	}))
+	require.NoError(t, db.Where("uuid = ?", "n1").First(&client).Error)
+	assert.True(t, client.ExpiredAt.UTC().Equal(want.Add(time.Hour).UTC()))
+
+	err = saveClient(db, map[string]interface{}{
+		"uuid":              "n1",
+		"expired_at":        want.Add(2 * time.Hour).UTC(),
+		"_match_expired_at": want.UTC(),
+	})
+	require.ErrorIs(t, err, ErrExpiryAlreadyChanged)
+	require.NoError(t, db.Where("uuid = ?", "n1").First(&client).Error)
+	assert.True(t, client.ExpiredAt.UTC().Equal(want.Add(time.Hour).UTC()))
+}
+
+func TestSaveClientRenewExpiryUsesServerRulesAndCAS(t *testing.T) {
+	db := newClientTestDB(t, "renew-expiry")
+	require.NoError(t, db.AutoMigrate(&models.BillingPriceVersion{}, &models.BillingFXSnapshot{}))
+	loc, err := time.LoadLocation("America/New_York")
+	require.NoError(t, err)
+	now := time.Date(2027, 2, 1, 12, 0, 0, 0, time.UTC)
+	start := time.Date(2027, 2, 14, 2, 30, 45, 0, loc).UTC()
+	require.NoError(t, db.Create(&models.Client{
+		UUID: "n1", Token: "token-n1", Name: "N",
+		BillingCycle: 30, ExpiryTimezone: "America/New_York",
+		ExpiredAt: &start, Price: 10, Currency: "CNY",
+	}).Error)
+
+	require.NoError(t, saveClientAt(db, map[string]interface{}{
+		"uuid": "n1", "renew_expiry": true,
+	}, now))
+	var client models.Client
+	require.NoError(t, db.Where("uuid = ?", "n1").First(&client).Error)
+	want := time.Date(2027, 3, 14, 3, 30, 45, 0, loc).UTC()
+	require.NotNil(t, client.ExpiredAt)
+	assert.True(t, client.ExpiredAt.UTC().Equal(want), "got %s want %s", client.ExpiredAt.UTC(), want)
+
+	err = saveClientAt(db, map[string]interface{}{
+		"uuid":              "n1",
+		"expired_at":        want.AddDate(0, 1, 0),
+		"_match_expired_at": start.UTC(),
+	}, now)
+	require.ErrorIs(t, err, ErrExpiryAlreadyChanged)
+
+	long := time.Date(2226, 1, 1, 0, 0, 0, 0, time.UTC)
+	require.NoError(t, db.Create(&models.Client{
+		UUID: "long", Token: "token-long", Name: "L",
+		BillingCycle: 30, ExpiredAt: &long,
+	}).Error)
+	err = saveClientAt(db, map[string]interface{}{"uuid": "long", "renew_expiry": true}, now)
+	require.Error(t, err)
+}
+
+func TestSaveClientRenewExpiryCatchesUpOnce(t *testing.T) {
+	db := newClientTestDB(t, "renew-expiry-catchup")
+	require.NoError(t, db.AutoMigrate(&models.BillingPriceVersion{}, &models.BillingFXSnapshot{}))
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	expired := now.Add(-20 * 24 * time.Hour)
+	require.Equal(t, 20*24*time.Hour, now.Sub(expired.UTC()))
+	require.True(t, expired.UTC().Before(now))
+	require.NoError(t, db.Create(&models.Client{
+		UUID: "n1", Token: "token-n1", Name: "N",
+		BillingCycle: 7, ExpiryTimezone: "Asia/Shanghai",
+		ExpiredAt: &expired, Price: 10, Currency: "CNY",
+	}).Error)
+	from := now.AddDate(0, -1, 0)
+	require.NoError(t, db.Create(&models.BillingPriceVersion{
+		Client: "n1", ClientName: "N", PriceMicros: 10_000_000, Currency: "CNY", CurrencyValid: true,
+		BillingCycleDays: 7, ExpiredAt: &expired, EffectiveFrom: from, Source: "migration",
+	}).Error)
+
+	require.NoError(t, saveClientAt(db, map[string]interface{}{
+		"uuid": "n1", "renew_expiry": true,
+	}, now))
+	var client models.Client
+	require.NoError(t, db.Where("uuid = ?", "n1").First(&client).Error)
+	require.NotNil(t, client.ExpiredAt)
+	assert.True(t, client.ExpiredAt.UTC().After(now))
+
+	want, err := expiry.NextDue(expired, "Asia/Shanghai", 7, now)
+	require.NoError(t, err)
+	assert.True(t, client.ExpiredAt.UTC().Equal(want), "got %s want %s", client.ExpiredAt.UTC(), want)
+
+	var versions []models.BillingPriceVersion
+	require.NoError(t, db.Where("client = ?", "n1").Order("id").Find(&versions).Error)
+	require.Len(t, versions, 2)
+	assert.NotNil(t, versions[0].EffectiveTo)
+	assert.Nil(t, versions[1].EffectiveTo)
+	require.NotNil(t, versions[1].ExpiredAt)
+	assert.True(t, versions[1].ExpiredAt.UTC().Equal(client.ExpiredAt.UTC()))
+}
+
+func TestSaveClientRenewExpiryConcurrentCAS(t *testing.T) {
+	t.Run("early then auto-renewal", func(t *testing.T) {
+		db, now, expired, next := newRenewalCASFixture(t)
+		assertRenewalCASPair(t, db, next,
+			saveEarlyRenewAt(db, now, expired),
+			saveAutoRenewAt(db, now, expired, next),
+		)
+	})
+	t.Run("auto-renewal then early", func(t *testing.T) {
+		db, now, expired, next := newRenewalCASFixture(t)
+		assertRenewalCASPair(t, db, next,
+			saveAutoRenewAt(db, now, expired, next),
+			saveEarlyRenewAt(db, now, expired),
+		)
+	})
+	t.Run("concurrent", func(t *testing.T) {
+		db, now, expired, next := newRenewalCASFixture(t)
+		sqlDB, err := db.DB()
+		require.NoError(t, err)
+		sqlDB.SetMaxOpenConns(1)
+		sqlDB.SetMaxIdleConns(1)
+
+		start := make(chan struct{})
+		errs := make(chan error, 2)
+		go func() {
+			<-start
+			errs <- saveEarlyRenewAt(db, now, expired)
+		}()
+		go func() {
+			<-start
+			errs <- saveAutoRenewAt(db, now, expired, next)
+		}()
+		close(start)
+		assertRenewalCASPair(t, db, next, <-errs, <-errs)
+	})
+}
+
+func newRenewalCASFixture(t *testing.T) (*gorm.DB, time.Time, time.Time, time.Time) {
+	t.Helper()
+	db := newClientTestDB(t, fmt.Sprintf("renew-expiry-cas-%d", time.Now().UnixNano()))
+	require.NoError(t, db.AutoMigrate(&models.BillingPriceVersion{}, &models.BillingFXSnapshot{}))
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	expired := now.Add(-time.Hour)
+	require.NoError(t, db.Create(&models.Client{
+		UUID: "n1", Token: "token-n1", Name: "N",
+		BillingCycle: 30, ExpiryTimezone: "Asia/Shanghai",
+		ExpiredAt: &expired, Price: 10, Currency: "CNY",
+	}).Error)
+	from := now.AddDate(0, -1, 0)
+	require.NoError(t, db.Create(&models.BillingPriceVersion{
+		Client: "n1", ClientName: "N", PriceMicros: 10_000_000, Currency: "CNY", CurrencyValid: true,
+		BillingCycleDays: 30, ExpiredAt: &expired, EffectiveFrom: from, Source: "migration",
+	}).Error)
+	next, err := expiry.NextDue(expired, "Asia/Shanghai", 30, now)
+	require.NoError(t, err)
+	return db, now, expired.UTC(), next
+}
+
+func saveEarlyRenewAt(db *gorm.DB, now, matchOld time.Time) error {
+	return saveClientAt(db, map[string]interface{}{
+		"uuid":              "n1",
+		"renew_expiry":      true,
+		"_match_expired_at": matchOld.UTC().Format(time.RFC3339Nano),
+	}, now)
+}
+
+func saveAutoRenewAt(db *gorm.DB, now, matchOld, next time.Time) error {
+	_, err := saveClientWithDispatchAt(db, map[string]interface{}{
+		"uuid":              "n1",
+		"expired_at":        next,
+		"_match_expired_at": matchOld,
+	}, billing.PriceSourceRenewal, now)
+	return err
+}
+
+func assertRenewalCASPair(t *testing.T, db *gorm.DB, next time.Time, first, second error) {
+	t.Helper()
+	okCount, conflictCount := 0, 0
+	for _, saveErr := range []error{first, second} {
+		if saveErr == nil {
+			okCount++
+			continue
+		}
+		if errors.Is(saveErr, ErrExpiryAlreadyChanged) {
+			conflictCount++
+			continue
+		}
+		t.Fatalf("unexpected save error: %v", saveErr)
+	}
+	require.Equal(t, 1, okCount)
+	require.Equal(t, 1, conflictCount)
+
+	var client models.Client
+	require.NoError(t, db.Where("uuid = ?", "n1").First(&client).Error)
+	require.NotNil(t, client.ExpiredAt)
+	assert.True(t, client.ExpiredAt.UTC().Equal(next), "got %s want %s", client.ExpiredAt.UTC(), next)
+
+	var versions []models.BillingPriceVersion
+	require.NoError(t, db.Where("client = ?", "n1").Order("id").Find(&versions).Error)
+	require.Len(t, versions, 2)
+	assert.NotNil(t, versions[0].EffectiveTo)
+	assert.Nil(t, versions[1].EffectiveTo)
+	require.NotNil(t, versions[1].ExpiredAt)
+	assert.True(t, versions[1].ExpiredAt.UTC().Equal(next))
+}
+
+func TestParseExpiryInstantNormalizesJSONAndGoTimes(t *testing.T) {
+	utc := time.Date(2026, 10, 21, 11, 0, 0, 0, time.UTC)
+	parsed, err := parseExpiryInstant(utc, "_match_expired_at")
+	require.NoError(t, err)
+	assert.True(t, parsed.Equal(utc))
+
+	pointer := utc
+	parsed, err = parseExpiryInstant(&pointer, "_match_expired_at")
+	require.NoError(t, err)
+	assert.True(t, parsed.Equal(utc))
+
+	parsed, err = parseExpiryInstant(utc.Format(time.RFC3339), "_match_expired_at")
+	require.NoError(t, err)
+	assert.True(t, parsed.Equal(utc))
+
+	parsed, err = parseExpiryInstant("2026-10-21T19:00:00+08:00", "_match_expired_at")
+	require.NoError(t, err)
+	assert.True(t, parsed.Equal(utc))
+
+	_, err = parseExpiryInstant("not-a-time", "_match_expired_at")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "_match_expired_at")
+
+	_, err = parseExpiryInstant((*time.Time)(nil), "expired_at")
+	require.Error(t, err)
+	_, err = parseExpiryInstant(21, "expired_at")
+	require.Error(t, err)
+}
+
+func TestSaveClientMatchExpiredAtParsesJSONStrings(t *testing.T) {
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	expired := time.Date(2026, 10, 21, 11, 0, 0, 0, time.UTC)
+	next, err := expiry.NextDue(expired, "Asia/Shanghai", 30, now)
+	require.NoError(t, err)
+
+	t.Run("rfc3339 string matches stored expiry", func(t *testing.T) {
+		db := newClientTestDB(t, "match-rfc3339")
+		require.NoError(t, db.Create(&models.Client{
+			UUID: "n1", Token: "token-n1", Name: "N",
+			BillingCycle: 30, ExpiryTimezone: "Asia/Shanghai",
+			ExpiredAt: &expired,
+		}).Error)
+		require.NoError(t, saveClientAt(db, map[string]interface{}{
+			"uuid":              "n1",
+			"renew_expiry":      true,
+			"_match_expired_at": expired.Format(time.RFC3339),
+		}, now))
+		var client models.Client
+		require.NoError(t, db.Where("uuid = ?", "n1").First(&client).Error)
+		require.NotNil(t, client.ExpiredAt)
+		assert.True(t, client.ExpiredAt.UTC().Equal(next), "got %s want %s", client.ExpiredAt.UTC(), next)
+	})
+
+	t.Run("offset instant matches after utc normalize", func(t *testing.T) {
+		db := newClientTestDB(t, "match-offset")
+		require.NoError(t, db.Create(&models.Client{
+			UUID: "n1", Token: "token-n1", Name: "N",
+			BillingCycle: 30, ExpiryTimezone: "Asia/Shanghai",
+			ExpiredAt: &expired,
+		}).Error)
+		require.NoError(t, saveClientAt(db, map[string]interface{}{
+			"uuid":              "n1",
+			"renew_expiry":      true,
+			"_match_expired_at": "2026-10-21T19:00:00+08:00",
+		}, now))
+		var client models.Client
+		require.NoError(t, db.Where("uuid = ?", "n1").First(&client).Error)
+		require.NotNil(t, client.ExpiredAt)
+		assert.True(t, client.ExpiredAt.UTC().Equal(next), "got %s want %s", client.ExpiredAt.UTC(), next)
+	})
+
+	t.Run("invalid string is rejected", func(t *testing.T) {
+		db := newClientTestDB(t, "match-invalid")
+		require.NoError(t, db.Create(&models.Client{
+			UUID: "n1", Token: "token-n1", Name: "N",
+			BillingCycle: 30, ExpiryTimezone: "Asia/Shanghai",
+			ExpiredAt: &expired,
+		}).Error)
+		err := saveClientAt(db, map[string]interface{}{
+			"uuid":              "n1",
+			"renew_expiry":      true,
+			"_match_expired_at": "not-a-time",
+		}, now)
+		require.Error(t, err)
+		require.NotErrorIs(t, err, ErrExpiryAlreadyChanged)
+		assert.Contains(t, err.Error(), "_match_expired_at")
+		var client models.Client
+		require.NoError(t, db.Where("uuid = ?", "n1").First(&client).Error)
+		require.NotNil(t, client.ExpiredAt)
+		assert.True(t, client.ExpiredAt.UTC().Equal(expired), "got %s want %s", client.ExpiredAt.UTC(), expired)
+	})
 }

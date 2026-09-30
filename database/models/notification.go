@@ -123,18 +123,111 @@ type TrafficCalibrationAdjustment struct {
 	CreatedAt     time.Time `json:"created_at" gorm:"index"`
 }
 
-// PingLossNotification defines packet-loss alerts for one client and ping task.
+const (
+	LatencyAlertNormal = "normal"
+	LatencyAlertHigh   = "high"
+	LatencyAlertLow    = "low"
+
+	AdaptiveBaselineWarming      = "warming"
+	AdaptiveBaselineReady        = "ready"
+	AdaptiveBaselineFrozen       = "frozen"
+	AdaptiveBaselineRecoveryHold = "recovery_hold"
+)
+
+// PingLossNotification defines packet-loss and latency-anomaly alerts for one
+// client and ping task.
 type PingLossNotification struct {
-	Id              uint       `json:"id,omitempty" gorm:"primaryKey;autoIncrement"`
-	Client          string     `json:"client" gorm:"type:varchar(36);not null;uniqueIndex:idx_ping_loss_notification_target"`
-	ClientInfo      Client     `json:"client_info,omitempty" gorm:"foreignKey:Client;references:UUID;constraint:OnDelete:CASCADE,OnUpdate:CASCADE"`
-	TaskId          uint       `json:"task_id" gorm:"not null;uniqueIndex:idx_ping_loss_notification_target"`
-	Task            PingTask   `json:"task,omitempty" gorm:"foreignKey:TaskId;references:Id;constraint:OnDelete:CASCADE,OnUpdate:CASCADE"`
-	Enable          bool       `json:"enable" gorm:"type:boolean;default:false"`
-	WindowSeconds   int        `json:"window_seconds" gorm:"type:int;not null;default:60"`
-	LossThreshold   float64    `json:"loss_threshold" gorm:"type:decimal(5,2);not null;default:5.00"`
-	MinimumSamples  int        `json:"minimum_samples" gorm:"type:int;not null;default:1"`
-	CooldownSeconds int        `json:"cooldown_seconds" gorm:"type:int;not null;default:300"`
-	LastNotified    *time.Time `json:"last_notified"`
-	AlertActive     bool       `json:"alert_active" gorm:"type:boolean;not null;default:false"`
+	Id                   uint       `json:"id,omitempty" gorm:"primaryKey;autoIncrement"`
+	Client               string     `json:"client" gorm:"type:varchar(36);not null;uniqueIndex:idx_ping_loss_notification_target"`
+	ClientInfo           Client     `json:"client_info,omitempty" gorm:"foreignKey:Client;references:UUID;constraint:OnDelete:CASCADE,OnUpdate:CASCADE"`
+	TaskId               uint       `json:"task_id" gorm:"not null;uniqueIndex:idx_ping_loss_notification_target"`
+	Task                 PingTask   `json:"task,omitempty" gorm:"foreignKey:TaskId;references:Id;constraint:OnDelete:CASCADE,OnUpdate:CASCADE"`
+	Enable               bool       `json:"enable" gorm:"type:boolean;default:false"`
+	LossEnabled          bool       `json:"loss_enabled" gorm:"type:boolean;not null;default:false"`
+	WindowSeconds        int        `json:"window_seconds" gorm:"type:int;not null;default:60"`
+	LossThreshold        float64    `json:"loss_threshold" gorm:"type:decimal(5,2);not null;default:5.00"`
+	MinimumSamples       int        `json:"minimum_samples" gorm:"type:int;not null;default:1"`
+	CooldownSeconds      int        `json:"cooldown_seconds" gorm:"type:int;not null;default:300"`
+	LastNotified         *time.Time `json:"last_notified"`
+	AlertActive          bool       `json:"alert_active" gorm:"type:boolean;not null;default:false"`
+	LossIncidentNotified bool       `json:"loss_incident_notified" gorm:"type:boolean;not null;default:false"`
+
+	LatencyEnabled                bool       `json:"latency_enabled" gorm:"type:boolean;not null;default:false"`
+	AdaptiveBaselineEnabled       bool       `json:"adaptive_baseline_enabled" gorm:"type:boolean;not null;default:false"`
+	LatencyWindowSeconds          int        `json:"latency_window_seconds" gorm:"type:int;not null;default:300"`
+	LatencyMinimumSamples         int        `json:"latency_minimum_samples" gorm:"type:int;not null;default:3"`
+	LatencyCooldownSeconds        int        `json:"latency_cooldown_seconds" gorm:"type:int;not null;default:1800"`
+	FixedBaselineMs               float64    `json:"fixed_baseline_ms" gorm:"type:decimal(12,3);not null;default:0"`
+	LowLatencyThresholdMs         float64    `json:"low_latency_threshold_ms" gorm:"type:decimal(12,3);not null;default:0"`
+	HighLatencyThresholdMs        float64    `json:"high_latency_threshold_ms" gorm:"type:decimal(12,3);not null;default:0"`
+	AdaptiveLowerDeviationPercent float64    `json:"adaptive_lower_deviation_percent" gorm:"type:decimal(8,2);not null;default:20"`
+	AdaptiveUpperDeviationPercent float64    `json:"adaptive_upper_deviation_percent" gorm:"type:decimal(8,2);not null;default:20"`
+	BaselineWindowSeconds         int        `json:"baseline_window_seconds" gorm:"type:int;not null;default:86400"`
+	BaselineMinimumSamples        int        `json:"baseline_minimum_samples" gorm:"type:int;not null;default:30"`
+	LatencyAlertState             string     `json:"latency_alert_state" gorm:"type:varchar(16);not null;default:'normal'"`
+	LatencyIncidentNotified       bool       `json:"latency_incident_notified" gorm:"type:boolean;not null;default:false"`
+	LatencyActiveSince            *time.Time `json:"latency_active_since"`
+	LatencyLastNotified           *time.Time `json:"latency_last_notified"`
+	LatencyLastEvaluatedAt        *time.Time `json:"latency_last_evaluated_at"`
+	LatencyLatestAverageMs        float64    `json:"latency_latest_average_ms" gorm:"type:decimal(12,3);not null;default:0"`
+	LatencySuccessfulSamples      int        `json:"latency_successful_samples" gorm:"type:int;not null;default:0"`
+	AdaptiveBaselineMs            *float64   `json:"adaptive_baseline_ms"`
+	AdaptiveBaselineStatus        string     `json:"adaptive_baseline_status" gorm:"type:varchar(32);not null;default:'warming'"`
+	AdaptiveBaselineSampleCount   int        `json:"adaptive_baseline_sample_count" gorm:"type:int;not null;default:0"`
+	AdaptiveBaselineUpdatedAt     *time.Time `json:"adaptive_baseline_updated_at"`
+	AdaptiveBaselineResumeAt      *time.Time `json:"adaptive_baseline_resume_at"`
+	AdaptiveBaselineFingerprint   string     `json:"adaptive_baseline_fingerprint" gorm:"type:varchar(255);not null;default:''"`
+	AdaptiveBaselineStartedAt     *time.Time `json:"adaptive_baseline_started_at"`
+}
+
+func NormalizeLatencyAlertState(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case LatencyAlertHigh:
+		return LatencyAlertHigh
+	case LatencyAlertLow:
+		return LatencyAlertLow
+	default:
+		return LatencyAlertNormal
+	}
+}
+
+func NormalizeAdaptiveBaselineStatus(value string, hasBaseline bool) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case AdaptiveBaselineReady:
+		if hasBaseline {
+			return AdaptiveBaselineReady
+		}
+	case AdaptiveBaselineFrozen:
+		if hasBaseline {
+			return AdaptiveBaselineFrozen
+		}
+	case AdaptiveBaselineRecoveryHold:
+		if hasBaseline {
+			return AdaptiveBaselineRecoveryHold
+		}
+	}
+	return AdaptiveBaselineWarming
+}
+
+func (n PingLossNotification) NormalizedLatencyAlertState() string {
+	return NormalizeLatencyAlertState(n.LatencyAlertState)
+}
+
+func (n PingLossNotification) HasAdaptiveBaseline() bool {
+	return n.AdaptiveBaselineMs != nil && *n.AdaptiveBaselineMs > 0
+}
+
+func (n PingLossNotification) NormalizedAdaptiveBaselineStatus() string {
+	return NormalizeAdaptiveBaselineStatus(n.AdaptiveBaselineStatus, n.HasAdaptiveBaseline())
+}
+
+func (n PingLossNotification) LatencyAlerting() bool {
+	state := n.NormalizedLatencyAlertState()
+	return state == LatencyAlertHigh || state == LatencyAlertLow
+}
+
+func AdaptiveBaselineFingerprint(taskType, target string, baselineWindowSeconds, baselineMinimumSamples int) string {
+	payload := fmt.Sprintf("%s\x1f%s\x1f%d\x1f%d", strings.TrimSpace(taskType), strings.TrimSpace(target), baselineWindowSeconds, baselineMinimumSamples)
+	sum := sha256.Sum256([]byte(payload))
+	return fmt.Sprintf("%x", sum[:8])
 }

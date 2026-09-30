@@ -3,13 +3,13 @@ package billing
 import (
 	"context"
 	"fmt"
-	"math"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/nuomiiiii/lite/database/models"
+	"github.com/nuomiiiii/lite/pkg/expiry"
 	"gorm.io/gorm"
 )
 
@@ -96,6 +96,7 @@ type BillingServerRow struct {
 	MonthExtra       string     `json:"month_extra"`
 	MonthTotal       string     `json:"month_total"`
 	ExpiredAt        *time.Time `json:"expired_at"`
+	ExpiryTimezone   string     `json:"expiry_timezone,omitempty"`
 	RemainingDays    *int       `json:"remaining_days"`
 	RemainingValue   *string    `json:"remaining_value"`
 }
@@ -345,7 +346,7 @@ func GetServers(ctx context.Context, db *gorm.DB, query ServerQuery) (ServerPage
 		return ServerPage{}, err
 	}
 	var clients []models.Client
-	if err := db.WithContext(ctx).Select("uuid", "name", "region", "group", "tags", "weight", "created_at").Find(&clients).Error; err != nil {
+	if err := db.WithContext(ctx).Select("uuid", "name", "region", "region_override", "group", "tags", "weight", "created_at", "expiry_timezone").Find(&clients).Error; err != nil {
 		return ServerPage{}, err
 	}
 	clientByID := make(map[string]models.Client, len(clients))
@@ -388,7 +389,7 @@ func GetServers(ctx context.Context, db *gorm.DB, query ServerQuery) (ServerPage
 	for _, version := range versions {
 		clientName, region, group, tags := version.ClientName, version.Region, version.Group, ""
 		if client, ok := clientByID[version.Client]; ok {
-			clientName, region, group, tags = client.Name, client.Region, client.Group, client.Tags
+			clientName, region, group, tags = client.Name, billingDisplayRegion(client), client.Group, client.Tags
 		}
 		if len(query.NativeCurrencies) > 0 {
 			if len(nativeSet) == 0 {
@@ -432,6 +433,12 @@ func GetServers(ctx context.Context, db *gorm.DB, query ServerQuery) (ServerPage
 			OriginalAmount: FormatAmountMicros(version.PriceMicros), OriginalCurrency: version.Currency,
 			CurrencyValid: version.CurrencyValid, BillingCycleDays: version.BillingCycleDays,
 			ExpiredAt: version.ExpiredAt,
+		}
+		if client, ok := clientByID[version.Client]; ok {
+			row.ExpiryTimezone = client.ExpiryTimezone
+			if strings.TrimSpace(row.ExpiryTimezone) == "" {
+				row.ExpiryTimezone = expiry.DefaultTimezone
+			}
 		}
 		switch {
 		case version.PriceMicros == -MicrosPerUnit:
@@ -486,6 +493,13 @@ func GetServers(ctx context.Context, db *gorm.DB, query ServerQuery) (ServerPage
 	total := len(rows)
 	start, end := pageBounds(total, query.Page, query.PageSize)
 	return ServerPage{Currency: currency, Items: rows[start:end], Page: pageInfo(total, query.Page, query.PageSize)}, nil
+}
+
+func billingDisplayRegion(client models.Client) string {
+	if override := strings.TrimSpace(client.RegionOverride); override != "" {
+		return override
+	}
+	return client.Region
 }
 
 func regionKey(region string) string {
@@ -1245,11 +1259,7 @@ func convertedLockedForecast(amount int64, version models.BillingPriceVersion, t
 }
 
 func isLongTermExpiry(expiredAt *time.Time) bool {
-	if expiredAt == nil {
-		return true
-	}
-	stamp := expiredAt.UTC()
-	return stamp.IsZero() || stamp.Year() < 2 || stamp.Year() > 2200
+	return expiry.IsLongTerm(expiredAt)
 }
 
 func remainingValue(version models.BillingPriceVersion, currency string, rates map[string]string, now time.Time) (*string, *int) {
@@ -1260,18 +1270,47 @@ func remainingValue(version models.BillingPriceVersion, currency string, rates m
 		return nil, nil
 	}
 	remaining := version.ExpiredAt.Sub(now)
-	days := int(math.Round(remaining.Hours() / 24))
 	if remaining <= 0 {
-		days = 0
+		days := 0
 		value := "0.000000"
 		return &value, &days
 	}
+	days := expiry.RemainingDaysCeil(*version.ExpiredAt, now)
 	cycle := time.Duration(version.BillingCycleDays) * 24 * time.Hour
 	amount, err := multiplyRatio(version.PriceMicros, remaining.Nanoseconds(), cycle.Nanoseconds())
 	if err != nil {
 		return nil, &days
 	}
 	return convertedForecast(amount, version.Currency, currency, rates), &days
+}
+
+type RemainingAmount struct {
+	Value    string
+	Currency string
+}
+
+func RemainingByClient(ctx context.Context, db *gorm.DB, now time.Time) (map[string]RemainingAmount, error) {
+	now = normalizedNow(now)
+	_, rates, err := LatestFXSnapshot(db.WithContext(ctx))
+	if err != nil && err != gorm.ErrRecordNotFound {
+		return nil, err
+	}
+	var versions []models.BillingPriceVersion
+	if err := db.WithContext(ctx).Where("effective_to IS NULL").Find(&versions).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[string]RemainingAmount, len(versions))
+	for _, version := range versions {
+		if !version.CurrencyValid || version.PriceMicros <= 0 || version.BillingCycleDays <= 0 {
+			continue
+		}
+		value, _ := remainingValue(version, version.Currency, rates, now)
+		if value == nil {
+			continue
+		}
+		out[version.Client] = RemainingAmount{Value: *value, Currency: version.Currency}
+	}
+	return out, nil
 }
 
 func remainingValueSummary(ctx context.Context, db *gorm.DB, currency string, now time.Time) (int64, int, error) {

@@ -271,6 +271,65 @@ func TestEditPingTasksAppliesPingLossDefaultsToNewlyAssignedServers(t *testing.T
 	assert.Equal(t, 6, rules[1].MinimumSamples)
 }
 
+func TestEditPingTasksResetsLearningWhenTargetOrTypeChanges(t *testing.T) {
+	db := newPingLossDefaultTestDB(t, "edit-ping-task-identity")
+	task := models.PingTask{
+		Name: "api", Clients: models.StringArray{"client-a"}, Type: "icmp", Target: "old.example.com", Interval: 10,
+	}
+	require.NoError(t, db.Create(&task).Error)
+	baseline := 150.0
+	notified := time.Date(2026, 9, 29, 10, 0, 0, 0, time.UTC)
+	since := notified
+	require.NoError(t, db.Create(&models.PingLossNotification{
+		Client: "client-a", TaskId: task.Id, Enable: true, LossEnabled: true, LatencyEnabled: true,
+		AdaptiveBaselineEnabled: true, WindowSeconds: 60, LossThreshold: 5, MinimumSamples: 1, CooldownSeconds: 300,
+		LatencyWindowSeconds: 300, LatencyMinimumSamples: 3, LatencyCooldownSeconds: 1800,
+		BaselineWindowSeconds: 86400, BaselineMinimumSamples: 30,
+		LatencyAlertState: models.LatencyAlertHigh, LatencyActiveSince: &since, LatencyLastNotified: &notified,
+		AdaptiveBaselineMs: &baseline, AdaptiveBaselineStatus: models.AdaptiveBaselineFrozen,
+		AdaptiveBaselineSampleCount: 40, AdaptiveBaselineUpdatedAt: &notified,
+		AdaptiveBaselineFingerprint: models.AdaptiveBaselineFingerprint("icmp", "old.example.com", 86400, 30),
+	}).Error)
+
+	renamed := task
+	renamed.Name = "api renamed"
+	renamed.Interval = 20
+	_, err := editPingTasks(db, []*models.PingTask{&renamed})
+	require.NoError(t, err)
+	var afterName models.PingLossNotification
+	require.NoError(t, db.First(&afterName).Error)
+	require.NotNil(t, afterName.AdaptiveBaselineMs)
+	assert.Equal(t, 150.0, *afterName.AdaptiveBaselineMs)
+	assert.Equal(t, models.LatencyAlertHigh, afterName.LatencyAlertState)
+	assert.NotNil(t, afterName.LatencyLastNotified)
+
+	retarget := renamed
+	retarget.Target = "new.example.com"
+	before := time.Now().UTC()
+	_, err = editPingTasks(db, []*models.PingTask{&retarget})
+	require.NoError(t, err)
+	var afterTarget models.PingLossNotification
+	require.NoError(t, db.First(&afterTarget).Error)
+	assert.Equal(t, models.LatencyAlertNormal, afterTarget.LatencyAlertState)
+	assert.Nil(t, afterTarget.LatencyActiveSince)
+	assert.Nil(t, afterTarget.LatencyLastNotified)
+	assert.Nil(t, afterTarget.AdaptiveBaselineMs)
+	assert.Equal(t, models.AdaptiveBaselineWarming, afterTarget.AdaptiveBaselineStatus)
+	assert.Equal(t, 0, afterTarget.AdaptiveBaselineSampleCount)
+	require.NotNil(t, afterTarget.AdaptiveBaselineStartedAt)
+	assert.False(t, afterTarget.AdaptiveBaselineStartedAt.Before(before.Add(-time.Second)))
+	assert.Equal(t, models.AdaptiveBaselineFingerprint("icmp", "new.example.com", 86400, 30), afterTarget.AdaptiveBaselineFingerprint)
+
+	retype := retarget
+	retype.Type = "tcp"
+	_, err = editPingTasks(db, []*models.PingTask{&retype})
+	require.NoError(t, err)
+	var afterType models.PingLossNotification
+	require.NoError(t, db.First(&afterType).Error)
+	assert.Equal(t, models.AdaptiveBaselineFingerprint("tcp", "new.example.com", 86400, 30), afterType.AdaptiveBaselineFingerprint)
+	assert.Equal(t, models.AdaptiveBaselineWarming, afterType.AdaptiveBaselineStatus)
+}
+
 func newPingLossDefaultTestDB(t *testing.T, name string) *gorm.DB {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open("file:"+name+"?mode=memory&cache=shared"), &gorm.Config{

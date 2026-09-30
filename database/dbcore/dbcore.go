@@ -1057,6 +1057,15 @@ func doInitialize() error {
 	if err != nil {
 		return fmt.Errorf("failed to create tables: %w", err)
 	}
+	if err := migrations.MigrateExpiryBeijingMidnight(instance); err != nil {
+		return fmt.Errorf("failed to migrate expiry timezones: %w", err)
+	}
+	if err := migrations.MigratePingHealthLossEnabled(instance); err != nil {
+		return fmt.Errorf("failed to migrate ping health alerts: %w", err)
+	}
+	if err := migrations.MigratePingHealthIncidentNotified(instance); err != nil {
+		return fmt.Errorf("failed to migrate ping health incident delivery flags: %w", err)
+	}
 	if err := instance.Exec(`
 		CREATE UNIQUE INDEX IF NOT EXISTS ux_mcp_operations_lease_idem
 		ON mcp_operations(lease_id, idempotency_key)

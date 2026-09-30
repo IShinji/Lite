@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nuomiiiii/lite/database/billing"
 	"github.com/nuomiiiii/lite/database/models"
 )
 
@@ -91,7 +92,7 @@ func TestThemeNodeOmitsForbiddenFieldsForGuestAndAdmin(t *testing.T) {
 		if !keys["kernel_version"] {
 			t.Fatalf("admin=%v: kernel_version should remain", isAdmin)
 		}
-		if !keys["uuid"] || !keys["effective_traffic_limit"] || !keys["traffic_reset_day"] || !keys["traffic_reset_at"] {
+		if !keys["uuid"] || !keys["effective_traffic_limit"] || !keys["traffic_reset_day"] || !keys["traffic_reset_at"] || !keys["expiry_timezone"] {
 			t.Fatalf("admin=%v: required theme fields missing: %v", isAdmin, keys)
 		}
 		if presented[0].TrafficResetAt == "" || presented[0].TrafficResetTimezone != "Asia/Shanghai" {
@@ -228,6 +229,45 @@ func TestToThemeNodeEmptyResetClockDoesNotPanic(t *testing.T) {
 	requireNotPanic()
 	if got.TrafficResetDay == nil || *got.TrafficResetDay != 21 {
 		t.Fatalf("empty clock should still expose reset day 21, got %v", got.TrafficResetDay)
+	}
+}
+
+func TestApplyThemeRemainingValuesAttachesNativeAmount(t *testing.T) {
+	nodes := presentThemeNodes([]models.Client{sampleThemeClient(false, "secret-token")}, false, true)
+	if nodes[0].RemainingValue != nil || nodes[0].RemainingValueCurrency != "" {
+		t.Fatalf("remaining value should stay omitted until attached: %+v", nodes[0])
+	}
+	applyThemeRemainingValues(nodes, map[string]billing.RemainingAmount{
+		"node-1": {Value: "12.340000", Currency: "USD"},
+		"other":  {Value: "1.000000", Currency: "CNY"},
+	})
+	if nodes[0].RemainingValue == nil || *nodes[0].RemainingValue != "12.340000" {
+		t.Fatalf("remaining value = %v", nodes[0].RemainingValue)
+	}
+	if nodes[0].RemainingValueCurrency != "USD" {
+		t.Fatalf("remaining currency = %q", nodes[0].RemainingValueCurrency)
+	}
+	keys := jsonObjectKeys(t, nodes[0])
+	if !keys["remaining_value"] || !keys["remaining_value_currency"] {
+		t.Fatalf("remaining fields missing: %v", keys)
+	}
+	mapped := themeNodeMap(nodes)["node-1"]
+	if mapped.RemainingValue == nil || *mapped.RemainingValue != "12.340000" || mapped.RemainingValueCurrency != "USD" {
+		t.Fatalf("map copy dropped remaining value: %+v", mapped)
+	}
+}
+
+func TestApplyThemeRemainingValuesOmitsMissingAndEmpty(t *testing.T) {
+	nodes := presentThemeNodes([]models.Client{sampleThemeClient(false, "secret-token")}, false, true)
+	applyThemeRemainingValues(nodes, map[string]billing.RemainingAmount{
+		"node-1": {Value: "", Currency: "USD"},
+	})
+	if nodes[0].RemainingValue != nil {
+		t.Fatalf("empty remaining value should stay omitted: %+v", nodes[0])
+	}
+	keys := jsonObjectKeys(t, nodes[0])
+	if keys["remaining_value"] || keys["remaining_value_currency"] {
+		t.Fatalf("empty remaining value leaked: %v", keys)
 	}
 }
 

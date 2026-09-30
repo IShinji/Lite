@@ -29,6 +29,24 @@ func setupNotificationDefaultsTestDB(t *testing.T, name string) *gorm.DB {
 	return db
 }
 
+func TestLatencyDefaultUpgradesUntouchedFactoryValues(t *testing.T) {
+	setupNotificationDefaultsTestDB(t, "notification-default-latency-upgrade")
+	require.NoError(t, config.Set(config.LatencyAnomalyNotificationDefaultKey, LatencyAnomalyNotificationDefaultConfig{
+		SchemaVersion: 1, Enabled: false, WindowSeconds: 300, MinimumSamples: 3, CooldownSeconds: 1800,
+		LowerDeviationPercent: 20, UpperDeviationPercent: 20,
+		BaselineWindowSeconds: 86400, BaselineMinimumSamples: 30,
+	}))
+
+	got, err := GetLatencyAnomalyNotificationDefaultConfig()
+	require.NoError(t, err)
+	assert.Equal(t, 2, got.SchemaVersion)
+	assert.Equal(t, 30, got.MinimumSamples)
+	assert.Equal(t, 25.0, got.LowerDeviationPercent)
+	assert.Equal(t, 25.0, got.UpperDeviationPercent)
+	assert.Equal(t, 1800, got.CooldownSeconds)
+	assert.Equal(t, 30, got.BaselineMinimumSamples)
+}
+
 func TestNotificationDefaultsPersistAndValidate(t *testing.T) {
 	setupNotificationDefaultsTestDB(t, "notification-default-config")
 
@@ -38,6 +56,9 @@ func TestNotificationDefaultsPersistAndValidate(t *testing.T) {
 	pingLoss, err := GetPingLossNotificationDefaultConfig()
 	require.NoError(t, err)
 	assert.Equal(t, defaultPingLossNotificationConfig, pingLoss)
+	latency, err := GetLatencyAnomalyNotificationDefaultConfig()
+	require.NoError(t, err)
+	assert.Equal(t, defaultLatencyAnomalyNotificationConfig, latency)
 	trafficReport, err := GetTrafficReportDefaultConfig()
 	require.NoError(t, err)
 	assert.Equal(t, defaultTrafficReportConfig, trafficReport)
@@ -69,6 +90,19 @@ func TestNotificationDefaultsPersistAndValidate(t *testing.T) {
 	gotPingLoss, err = GetPingLossNotificationDefaultConfig()
 	require.NoError(t, err)
 	assert.Equal(t, wantPingLoss, gotPingLoss)
+
+	wantLatency := LatencyAnomalyNotificationDefaultConfig{
+		SchemaVersion: 1, Enabled: true, WindowSeconds: 300, MinimumSamples: 3, CooldownSeconds: 1800,
+		LowerDeviationPercent: 15, UpperDeviationPercent: 25,
+		BaselineWindowSeconds: 86400, BaselineMinimumSamples: 40,
+	}
+	require.NoError(t, SetLatencyAnomalyNotificationDefaultConfig(wantLatency))
+	gotLatency, err := GetLatencyAnomalyNotificationDefaultConfig()
+	require.NoError(t, err)
+	assert.Equal(t, wantLatency, gotLatency)
+	invalidLatency := wantLatency
+	invalidLatency.LowerDeviationPercent = 0
+	require.Error(t, SetLatencyAnomalyNotificationDefaultConfig(invalidLatency))
 
 	wantTrafficReport := TrafficReportDefaultConfig{
 		Enabled: true, Daily: false, Weekly: true, Monthly: true,
@@ -130,6 +164,8 @@ func TestApplyDefaultsToNewClientTargetsAssignedTasksOnly(t *testing.T) {
 	require.Len(t, rules, 1)
 	assert.Equal(t, assignedTask.Id, rules[0].TaskId)
 	assert.True(t, rules[0].Enable)
+	assert.True(t, rules[0].LossEnabled)
+	assert.False(t, rules[0].LatencyEnabled)
 	assert.Equal(t, 180, rules[0].WindowSeconds)
 	assert.Equal(t, 12.5, rules[0].LossThreshold)
 	assert.Equal(t, 7, rules[0].MinimumSamples)
@@ -205,6 +241,8 @@ func TestApplyPingLossDefaultsToTaskClientsCreatesMissingRulesOnly(t *testing.T)
 	assert.Equal(t, 5.0, rules[0].LossThreshold)
 	assert.Equal(t, "client-b", rules[1].Client)
 	assert.True(t, rules[1].Enable)
+	assert.True(t, rules[1].LossEnabled)
+	assert.False(t, rules[1].LatencyEnabled)
 	assert.Equal(t, 60, rules[1].WindowSeconds)
 	assert.Equal(t, 30.0, rules[1].LossThreshold)
 	assert.Equal(t, 6, rules[1].MinimumSamples)
@@ -216,4 +254,57 @@ func TestApplyPingLossDefaultsToTaskClientsCreatesMissingRulesOnly(t *testing.T)
 	require.NoError(t, ApplyPingLossDefaultsToTaskClients(db, task.Id, []string{"client-c"}))
 	require.NoError(t, db.Where("task_id = ?", task.Id).Find(&rules).Error)
 	require.Len(t, rules, 2)
+}
+
+func TestLatencyAnomalyDefaultsCreateAdaptiveRulesOnly(t *testing.T) {
+	db := setupNotificationDefaultsTestDB(t, "notification-default-latency")
+	require.NoError(t, db.Create(&models.Client{UUID: "client-a", Token: "token-a"}).Error)
+	task := models.PingTask{
+		Name: "api", Clients: models.StringArray{"client-a", "client-b"}, Type: "icmp", Target: "api.example.com", Interval: 10,
+	}
+	require.NoError(t, db.Create(&task).Error)
+	require.NoError(t, SetPingLossNotificationDefaultConfig(PingLossNotificationDefaultConfig{
+		Enabled: false, WindowSeconds: 60, LossThreshold: 5, MinimumSamples: 1, CooldownSeconds: 300,
+	}))
+	require.NoError(t, SetLatencyAnomalyNotificationDefaultConfig(LatencyAnomalyNotificationDefaultConfig{
+		Enabled: true, WindowSeconds: 300, MinimumSamples: 3, CooldownSeconds: 1800,
+		LowerDeviationPercent: 10, UpperDeviationPercent: 30,
+		BaselineWindowSeconds: 86400, BaselineMinimumSamples: 30,
+	}))
+
+	require.NoError(t, ApplyPingLossDefaultsToTaskClients(db, task.Id, []string{"client-a"}))
+	var created models.PingLossNotification
+	require.NoError(t, db.Where("client = ?", "client-a").First(&created).Error)
+	assert.True(t, created.Enable)
+	assert.False(t, created.LossEnabled)
+	assert.True(t, created.LatencyEnabled)
+	assert.True(t, created.AdaptiveBaselineEnabled)
+	assert.Equal(t, 10.0, created.AdaptiveLowerDeviationPercent)
+	assert.Equal(t, 30.0, created.AdaptiveUpperDeviationPercent)
+	assert.Nil(t, created.AdaptiveBaselineMs)
+	assert.Equal(t, models.AdaptiveBaselineWarming, created.AdaptiveBaselineStatus)
+
+	require.NoError(t, db.Model(&created).Updates(map[string]any{
+		"latency_window_seconds": 120,
+		"adaptive_baseline_ms":   88.0,
+	}).Error)
+	require.NoError(t, SetPingLossNotificationDefaultConfig(PingLossNotificationDefaultConfig{
+		Enabled: true, WindowSeconds: 90, LossThreshold: 8, MinimumSamples: 4, CooldownSeconds: 600,
+	}))
+	require.NoError(t, ApplyPingLossDefaultsToTaskClients(db, task.Id, []string{"client-a", "client-b"}))
+
+	var rules []models.PingLossNotification
+	require.NoError(t, db.Order("client ASC").Where("task_id = ?", task.Id).Find(&rules).Error)
+	require.Len(t, rules, 2)
+	assert.Equal(t, "client-a", rules[0].Client)
+	assert.False(t, rules[0].LossEnabled)
+	assert.Equal(t, 120, rules[0].LatencyWindowSeconds)
+	require.NotNil(t, rules[0].AdaptiveBaselineMs)
+	assert.Equal(t, 88.0, *rules[0].AdaptiveBaselineMs)
+	assert.Equal(t, "client-b", rules[1].Client)
+	assert.True(t, rules[1].Enable)
+	assert.True(t, rules[1].LossEnabled)
+	assert.True(t, rules[1].LatencyEnabled)
+	assert.True(t, rules[1].AdaptiveBaselineEnabled)
+	assert.Nil(t, rules[1].AdaptiveBaselineMs)
 }

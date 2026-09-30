@@ -63,19 +63,25 @@ jobs:
           fi
 
           VERSION_HASH="$REQUESTED_HASH"
+          HASH_FROM_EXISTING=0
           if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             EXISTING_BODY="$(gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" --json body --jq .body)"
             if [ -z "$VERSION_HASH" ] && [[ "$EXISTING_BODY" =~ (lite|komari)-version-hash:[[:space:]]*([A-Za-z0-9]{7}) ]]; then
               VERSION_HASH="${BASH_REMATCH[2]}"
+              HASH_FROM_EXISTING=1
             fi
           fi
 
           if [ -z "$VERSION_HASH" ]; then
-            VERSION_HASH="$(node -e 'const c=require("crypto"),a="abcdefghijklmnopqrstuvwxyz0123456789";let s;do{s=Array.from(c.randomBytes(7),b=>a[b%a.length]).join("")}while(!/[a-z]/.test(s)||!/[0-9]/.test(s));process.stdout.write(s)')"
+            VERSION_HASH="$(node -e 'const c=require("crypto"),a="abcdefghijklmnoprstuvwxyz0123456789";let s;do{s=Array.from(c.randomBytes(7),b=>a[b%a.length]).join("")}while(!/[a-z]/.test(s)||!/[0-9]/.test(s));process.stdout.write(s)')"
           fi
 
           if [[ ! "$VERSION_HASH" =~ ^[A-Za-z0-9]{7}$ ]]; then
             echo "Version identifier must contain exactly seven letters or digits." >&2
+            exit 1
+          fi
+          if [ "$HASH_FROM_EXISTING" != 1 ] && [[ "$VERSION_HASH" == *q* ]]; then
+            echo "Version identifier must not contain q: $VERSION_HASH" >&2
             exit 1
           fi
 

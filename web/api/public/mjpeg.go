@@ -22,6 +22,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/nuomiiiii/lite/database/models"
 	conf "github.com/nuomiiiii/lite/pkg/config"
+	"github.com/nuomiiiii/lite/pkg/expiry"
 	jsonRpc "github.com/nuomiiiii/lite/web/rpc/jsonrpc"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/basicfont"
@@ -1401,7 +1402,7 @@ func formatPriceL(price float64, cycle int, currency string, lp langPack) string
 
 func formatRemainingL(expiredAt time.Time, autoRenewal bool, lp langPack) string {
 	now := time.Now().UTC()
-	if expiredAt.IsZero() || expiredAt.Year() > 2200 {
+	if expiry.IsLongTerm(&expiredAt) {
 		return lp.LongTerm
 	}
 
@@ -1410,7 +1411,7 @@ func formatRemainingL(expiredAt time.Time, autoRenewal bool, lp langPack) string
 		return lp.Expired
 	}
 
-	days := int(diff.Hours() / 24)
+	days := expiry.RemainingDaysCeil(expiredAt, now)
 	if days > 365 {
 		years := days / 365
 		return fmt.Sprintf("%d%s", years, lp.YearPlus)

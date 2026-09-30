@@ -3,6 +3,7 @@ package clients
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/nuomiiiii/lite/database/tasks"
 	"github.com/nuomiiiii/lite/database/trafficledger"
 	"github.com/nuomiiiii/lite/pkg/config"
+	"github.com/nuomiiiii/lite/pkg/expiry"
 	"github.com/nuomiiiii/lite/pkg/trafficreset"
 	v2 "github.com/nuomiiiii/lite/protocol/v2"
 	"github.com/nuomiiiii/lite/utils"
@@ -26,6 +28,8 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
+
+var ErrExpiryAlreadyChanged = errors.New("expired_at has already changed")
 
 func DeleteClient(clientUuid string) error {
 	metricstore.BlockEntityWrites(clientUuid)
@@ -493,6 +497,7 @@ func newClient(clientUUID, token, name string, now time.Time) models.Client {
 		Token:            token,
 		Name:             name,
 		TrafficLimitType: "sum",
+		ExpiryTimezone:   expiry.DefaultTimezone,
 		CreatedAt:        now,
 		UpdatedAt:        now,
 	}
@@ -700,9 +705,14 @@ func saveClientWithSource(db *gorm.DB, updates map[string]interface{}, source st
 }
 
 func saveClientWithDispatch(db *gorm.DB, updates map[string]interface{}, source string) (ClientDispatch, error) {
+	return saveClientWithDispatchAt(db, updates, source, time.Now().UTC())
+}
+
+func saveClientWithDispatchAt(db *gorm.DB, updates map[string]interface{}, source string, now time.Time) (ClientDispatch, error) {
 	if source == "" {
 		source = billing.PriceSourceClientEdit
 	}
+	now = now.UTC()
 	cloned := make(map[string]interface{}, len(updates))
 	for key, value := range updates {
 		cloned[key] = value
@@ -710,7 +720,7 @@ func saveClientWithDispatch(db *gorm.DB, updates map[string]interface{}, source 
 	var dispatch ClientDispatch
 	err := db.Transaction(func(tx *gorm.DB) error {
 		var err error
-		dispatch, err = saveClientTransaction(tx, cloned, source)
+		dispatch, err = saveClientTransaction(tx, cloned, source, now)
 		return err
 	})
 	if err != nil {
@@ -720,7 +730,7 @@ func saveClientWithDispatch(db *gorm.DB, updates map[string]interface{}, source 
 	return dispatch, nil
 }
 
-func saveClientTransaction(db *gorm.DB, updates map[string]interface{}, source string) (ClientDispatch, error) {
+func saveClientTransaction(db *gorm.DB, updates map[string]interface{}, source string, now time.Time) (ClientDispatch, error) {
 	clientUUID, ok := updates["uuid"].(string)
 	if !ok || clientUUID == "" {
 		return ClientDispatch{}, fmt.Errorf("invalid client UUID")
@@ -732,7 +742,7 @@ func saveClientTransaction(db *gorm.DB, updates map[string]interface{}, source s
 	}
 
 	var existing models.Client
-	if err := db.Select("uuid", "name", "region", "group", "price", "billing_cycle", "currency", "expired_at", "region_override", "traffic_limit", "traffic_limit_type", "traffic_reset_day", "traffic_reset_time", "traffic_reset_timezone", "traffic_reset_allowance", "traffic_reset_cycle").
+	if err := db.Select("uuid", "name", "region", "group", "price", "billing_cycle", "currency", "expired_at", "expiry_timezone", "region_override", "traffic_limit", "traffic_limit_type", "traffic_reset_day", "traffic_reset_time", "traffic_reset_timezone", "traffic_reset_allowance", "traffic_reset_cycle").
 		Where("uuid = ?", clientUUID).First(&existing).Error; err != nil {
 		return ClientDispatch{}, err
 	}
@@ -826,7 +836,7 @@ func saveClientTransaction(db *gorm.DB, updates map[string]interface{}, source s
 	}
 	if _, allowanceChanged := updates["traffic_reset_allowance"]; allowanceChanged {
 		if resetAllowance > 0 {
-			cycle := currentTrafficCycleAt(resetDay, resetTime, resetTimezone, time.Now().UTC())
+			cycle := currentTrafficCycleAt(resetDay, resetTime, resetTimezone, now)
 			if cycle == "" {
 				return ClientDispatch{}, fmt.Errorf("set a traffic reset day from 1 to 31 before adding reset traffic")
 			}
@@ -842,7 +852,7 @@ func saveClientTransaction(db *gorm.DB, updates map[string]interface{}, source s
 			updates["traffic_reset_cycle"] = ""
 		}
 	} else if _, resetDayChanged := updates["traffic_reset_day"]; resetDayChanged {
-		cycle := currentTrafficCycleAt(resetDay, resetTime, resetTimezone, time.Now().UTC())
+		cycle := currentTrafficCycleAt(resetDay, resetTime, resetTimezone, now)
 		if resetAllowance <= 0 || cycle == "" {
 			updates["traffic_reset_allowance"] = 0
 			updates["traffic_reset_cycle"] = ""
@@ -850,7 +860,7 @@ func saveClientTransaction(db *gorm.DB, updates map[string]interface{}, source s
 			updates["traffic_reset_cycle"] = cycle
 		}
 	} else if _, timeChanged := updates["traffic_reset_time"]; timeChanged {
-		cycle := currentTrafficCycleAt(resetDay, resetTime, resetTimezone, time.Now().UTC())
+		cycle := currentTrafficCycleAt(resetDay, resetTime, resetTimezone, now)
 		if resetAllowance <= 0 || cycle == "" {
 			updates["traffic_reset_allowance"] = 0
 			updates["traffic_reset_cycle"] = ""
@@ -858,7 +868,7 @@ func saveClientTransaction(db *gorm.DB, updates map[string]interface{}, source s
 			updates["traffic_reset_cycle"] = cycle
 		}
 	} else if _, tzChanged := updates["traffic_reset_timezone"]; tzChanged {
-		cycle := currentTrafficCycleAt(resetDay, resetTime, resetTimezone, time.Now().UTC())
+		cycle := currentTrafficCycleAt(resetDay, resetTime, resetTimezone, now)
 		if resetAllowance <= 0 || cycle == "" {
 			updates["traffic_reset_allowance"] = 0
 			updates["traffic_reset_cycle"] = ""
@@ -880,38 +890,110 @@ func saveClientTransaction(db *gorm.DB, updates map[string]interface{}, source s
 		}
 		updates["currency"] = currency
 	}
-	if value, exists := updates["expired_at"]; exists {
-		switch typed := value.(type) {
-		case nil:
-			updates["expired_at"] = nil
-		case time.Time:
-			updates["expired_at"] = typed.UTC()
-		case *time.Time:
-			if typed == nil {
-				updates["expired_at"] = nil
-			} else {
-				updates["expired_at"] = typed.UTC()
-			}
-		case string:
-			stamp, err := time.Parse(time.RFC3339Nano, typed)
-			if err != nil {
-				return ClientDispatch{}, fmt.Errorf("expired_at must be an RFC3339 timestamp with a timezone: %w", err)
-			}
-			updates["expired_at"] = stamp.UTC()
-		default:
-			return ClientDispatch{}, fmt.Errorf("expired_at must be an RFC3339 timestamp with a timezone")
+	_, hasExpiredAt := updates["expired_at"]
+	localRaw, hasLocal := updates["expiry_local_datetime"]
+	renewExpiry, hasRenew := boolFromUpdate(updates["renew_expiry"])
+	if hasRenew {
+		delete(updates, "renew_expiry")
+	}
+	if hasExpiredAt && hasLocal {
+		return ClientDispatch{}, fmt.Errorf("expired_at and expiry_local_datetime cannot be set together")
+	}
+	if renewExpiry && (hasExpiredAt || hasLocal) {
+		return ClientDispatch{}, fmt.Errorf("renew_expiry cannot be combined with expired_at or expiry_local_datetime")
+	}
+	if _, hasCycle := updates["billing_cycle"]; renewExpiry && hasCycle {
+		return ClientDispatch{}, fmt.Errorf("renew_expiry cannot be combined with billing_cycle")
+	}
+	if _, hasTimezone := updates["expiry_timezone"]; renewExpiry && hasTimezone {
+		return ClientDispatch{}, fmt.Errorf("renew_expiry cannot be combined with expiry_timezone")
+	}
+	if hasLocal {
+		delete(updates, "expiry_local_datetime")
+	}
+	timezone := existing.ExpiryTimezone
+	if value, exists := updates["expiry_timezone"]; exists {
+		raw, ok := value.(string)
+		if !ok {
+			return ClientDispatch{}, fmt.Errorf("expiry_timezone must be a string")
+		}
+		normalized, err := expiry.NormalizeTimezone(raw)
+		if err != nil {
+			return ClientDispatch{}, err
+		}
+		timezone = normalized
+		updates["expiry_timezone"] = normalized
+	} else if strings.TrimSpace(timezone) == "" {
+		timezone = expiry.DefaultTimezone
+		if hasLocal {
+			updates["expiry_timezone"] = timezone
 		}
 	}
+	if hasLocal {
+		local, ok := localRaw.(string)
+		if !ok {
+			return ClientDispatch{}, fmt.Errorf("expiry local datetime must be YYYY-MM-DDTHH:mm:ss")
+		}
+		stamp, err := expiry.ParseLocalDateTime(local, timezone)
+		if err != nil {
+			return ClientDispatch{}, err
+		}
+		updates["expired_at"] = stamp
+	} else if renewExpiry {
+		if expiry.IsLongTerm(existing.ExpiredAt) {
+			return ClientDispatch{}, fmt.Errorf("long-term expiry cannot be renewed early")
+		}
+		if existing.BillingCycle <= 0 {
+			return ClientDispatch{}, fmt.Errorf("billing cycle must be positive")
+		}
+		next, err := expiry.NextDue(*existing.ExpiredAt, timezone, existing.BillingCycle, now)
+		if err != nil {
+			return ClientDispatch{}, err
+		}
+		updates["expired_at"] = next
+		if _, hasPresetMatch := updates["_match_expired_at"]; !hasPresetMatch {
+			updates["_match_expired_at"] = existing.ExpiredAt.UTC()
+		}
+	} else if value, exists := updates["expired_at"]; exists {
+		if value == nil {
+			updates["expired_at"] = nil
+		} else if typed, ok := value.(*time.Time); ok && typed == nil {
+			updates["expired_at"] = nil
+		} else {
+			stamp, err := parseExpiryInstant(value, "expired_at")
+			if err != nil {
+				return ClientDispatch{}, err
+			}
+			updates["expired_at"] = stamp
+		}
+	}
+	matchExpiredAt, hasMatch := updates["_match_expired_at"]
+	if hasMatch {
+		delete(updates, "_match_expired_at")
+		parsed, err := parseExpiryInstant(matchExpiredAt, "_match_expired_at")
+		if err != nil {
+			return ClientDispatch{}, err
+		}
+		matchExpiredAt = parsed
+	}
 
-	updates["updated_at"] = time.Now().UTC()
+	updates["updated_at"] = now
 
 	if db.Migrator().HasTable(&models.BillingPriceVersion{}) {
-		if err := billing.CapturePriceVersion(db, existing, updates, source, time.Now().UTC()); err != nil {
+		if err := billing.CapturePriceVersion(db, existing, updates, source, now); err != nil {
 			return ClientDispatch{}, err
 		}
 	}
-	if err := db.Model(&models.Client{}).Where("uuid = ?", clientUUID).Updates(updates).Error; err != nil {
-		return ClientDispatch{}, err
+	query := db.Model(&models.Client{}).Where("uuid = ?", clientUUID)
+	if hasMatch {
+		query = query.Where("expired_at = ?", matchExpiredAt)
+	}
+	result := query.Updates(updates)
+	if result.Error != nil {
+		return ClientDispatch{}, result.Error
+	}
+	if hasMatch && result.RowsAffected == 0 {
+		return ClientDispatch{}, ErrExpiryAlreadyChanged
 	}
 
 	_, dayChanged := updates["traffic_reset_day"]
@@ -929,6 +1011,26 @@ func saveClientTransaction(db *gorm.DB, updates map[string]interface{}, source s
 		return ClientDispatch{}, err
 	}
 	return dispatch, nil
+}
+
+func parseExpiryInstant(value interface{}, field string) (time.Time, error) {
+	switch typed := value.(type) {
+	case time.Time:
+		return typed.UTC(), nil
+	case *time.Time:
+		if typed == nil {
+			return time.Time{}, fmt.Errorf("%s must be an RFC3339 timestamp with a timezone", field)
+		}
+		return typed.UTC(), nil
+	case string:
+		stamp, err := time.Parse(time.RFC3339Nano, typed)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("%s must be an RFC3339 timestamp with a timezone: %w", field, err)
+		}
+		return stamp.UTC(), nil
+	default:
+		return time.Time{}, fmt.Errorf("%s must be an RFC3339 timestamp with a timezone", field)
+	}
 }
 
 func toInt64(value interface{}) (int64, bool) {
@@ -1012,6 +1114,37 @@ func normalizeRegionOverride(value string) (string, error) {
 		return value, nil
 	}
 	return "", fmt.Errorf("region_override must be a two-letter country code or country flag")
+}
+
+func boolFromUpdate(value interface{}) (bool, bool) {
+	if value == nil {
+		return false, false
+	}
+	switch typed := value.(type) {
+	case bool:
+		return typed, true
+	case string:
+		switch strings.ToLower(strings.TrimSpace(typed)) {
+		case "true", "1":
+			return true, true
+		case "false", "0", "":
+			return false, true
+		default:
+			return false, true
+		}
+	case float64:
+		return typed != 0, true
+	case int:
+		return typed != 0, true
+	case json.Number:
+		parsed, err := typed.Float64()
+		if err != nil {
+			return false, true
+		}
+		return parsed != 0, true
+	default:
+		return false, true
+	}
 }
 
 func normalizeTrafficResetDay(value interface{}) (*int, error) {

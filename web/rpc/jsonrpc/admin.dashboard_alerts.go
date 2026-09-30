@@ -245,21 +245,38 @@ func buildDashboardLatencyAlerts(now time.Time) dashboardAlertSummary {
 	result := dashboardAlertSummary{}
 	affected := make(map[string]struct{})
 	for _, notification := range notifications {
-		if !notification.AlertActive {
-			if notification.LastNotified != nil && sameDashboardDay(*notification.LastNotified, now) {
-				result.RecoveredToday++
+		if notification.LossEnabled && notification.AlertActive {
+			result.Current++
+			affected[notification.Client] = struct{}{}
+			result.Items = append(result.Items, dashboardAlertAffectedItem{
+				Kind: "latency_loss", Title: "丢包异常", NodeUUID: notification.Client,
+				NodeName: notification.ClientInfo.Name, TaskID: notification.TaskId, TaskName: notification.Task.Name,
+			})
+			if notification.LastNotified != nil {
+				setDashboardLatest(&result, "丢包异常", notification.ClientInfo.Name, notification.Client,
+					notification.TaskId, notification.Task.Name, *notification.LastNotified)
 			}
-			continue
+		} else if notification.LossEnabled && notification.LastNotified != nil && sameDashboardDay(*notification.LastNotified, now) {
+			result.RecoveredToday++
 		}
-		result.Current++
-		affected[notification.Client] = struct{}{}
-		result.Items = append(result.Items, dashboardAlertAffectedItem{
-			Kind: "latency_loss", Title: "ping loss", NodeUUID: notification.Client,
-			NodeName: notification.ClientInfo.Name, TaskID: notification.TaskId, TaskName: notification.Task.Name,
-		})
-		if notification.LastNotified != nil {
-			setDashboardLatest(&result, "ping loss", notification.ClientInfo.Name, notification.Client,
-				notification.TaskId, notification.Task.Name, *notification.LastNotified)
+
+		if notification.LatencyAlerting() {
+			title := "延迟过高"
+			if notification.NormalizedLatencyAlertState() == models.LatencyAlertLow {
+				title = "延迟过低"
+			}
+			result.Current++
+			affected[notification.Client] = struct{}{}
+			result.Items = append(result.Items, dashboardAlertAffectedItem{
+				Kind: "latency_loss", Title: title, NodeUUID: notification.Client,
+				NodeName: notification.ClientInfo.Name, TaskID: notification.TaskId, TaskName: notification.Task.Name,
+			})
+			if notification.LatencyLastNotified != nil {
+				setDashboardLatest(&result, title, notification.ClientInfo.Name, notification.Client,
+					notification.TaskId, notification.Task.Name, *notification.LatencyLastNotified)
+			}
+		} else if notification.LatencyEnabled && notification.LatencyLastNotified != nil && sameDashboardDay(*notification.LatencyLastNotified, now) {
+			result.RecoveredToday++
 		}
 	}
 	result.AffectedNodes = len(affected)

@@ -9,7 +9,7 @@ Lite 是一款轻量、自托管的服务器监控与运维管理工具。服务
 
 本项目基于 [komari-monitor/komari](https://github.com/komari-monitor/komari) 持续开发，重点改善低配置主控上的数据库占用、历史查询和维护负载，同时提供流量管理、成本中心、备份迁移、接入安全与适配电脑和手机的管理界面。
 
-**当前正式版：Lite [`2.3.5`](https://github.com/nuomiiiii/Lite/releases/tag/2.3.5) · 配套 Agent [`2.3.3.5`](https://github.com/nuomiiiii/Lite-agent/releases/tag/2.3.3.5) · 默认主题 [`1.1.4`](https://github.com/nuomiiiii/Lite-theme/releases/tag/v1.1.4)**
+**当前正式版：Lite [`2.3.6`](https://github.com/nuomiiiii/Lite/releases/tag/2.3.6) · 配套 Agent [`2.3.3.5`](https://github.com/nuomiiiii/Lite-agent/releases/tag/2.3.3.5) · 默认主题 [`1.2.2`](https://github.com/nuomiiiii/Lite-theme/releases/tag/v1.2.2)**
 
 > [!IMPORTANT]
 > 系统 Web UI 与公开大屏主题独立：Lite Web 负责管理后台、远程终端等系统页面，主题只影响公开大屏。默认和保底主题都是 [Lite-Theme](https://github.com/nuomiiiii/Lite-theme)，可独立更新，并在已有其他可用主题时删除；主题管理始终要求至少保留一个可用主题。原经典主题已拆分为独立的 [lite-Classic](https://github.com/nuomiiiii/lite-Classic)，不再随 Lite 内置。从 Nezha / 旧默认主题升级时会迁到 Lite-Theme。
@@ -19,16 +19,15 @@ Lite 是一款轻量、自托管的服务器监控与运维管理工具。服务
 > [!WARNING]
 > Lite 只能部署在你拥有或已获得授权管理的设备上。请勿将其用于未经授权的访问、持久化、命令执行或其他滥用行为。管理员应启用 HTTPS 与双因素认证，并妥善保护 Agent Token 和备份文件。
 
-## 2.3.5 稳定版能力摘要
+## 2.3.6 稳定版能力摘要
 
-- **回程监测**：修复新建回程监测时，「探测节点」下方出现大片空白的问题。
-- **手机端远程终端**：命令框为空时，点发送也会向终端送出回车。
-- **操作日志**：按当前界面语言显示，功能名称与设置页原文一致。
-- **远程执行**：新增「命令剪贴板」，内容与远程终端页面中的「命令剪贴板」一致。选中命令后自动填入命令框；执行时仍需先选择服务器，再按原来的方式确认并执行。
-- **通知测试**：关闭通知后，通知渠道页仍可以发送测试消息。
-- **通行密钥**：优化添加逻辑。
-- **Linux 自动更新**：成功后只保留最近一份可以恢复的回滚备份，以及最近一份升级前的数据备份。新备份没写完时，不会先删掉上一份。
-- **配套组件**：Lite-agent 仍为 `2.3.3.5`，默认 Lite-Theme 为 `1.1.4`。
+- **延迟监测告警**：进一步细分为「丢包告警」和「延迟异常告警」。原有配置会自动迁移至丢包告警；延迟异常支持自适应基线和固定基线。
+- **服务器到期时间**：可以指定时区，并精确到秒。原有到期日升级后记为北京时间当天 00:00:00。
+- **仪表盘**：每日流量明细里，点击服务器名称会进入这台服务器的用量统计。
+- **成本中心**：服务器国旗跟随手选的国家/地区图标；没手选时仍用自动识别。
+- **日志**：过长的 IPv6 会自动换行，不再盖住后面的类型和内容。
+- **手机端远程终端**：复制、粘贴、Tab 旁新增「Ctrl+C」，用来打断正在执行的命令。
+- **内置主题**：Lite-Theme `1.2.2` 已支持服务器剩余价值和账号头像地址。
 
 ## 功能概览
 
@@ -78,7 +77,7 @@ docker run -d \
   ghcr.io/nuomiiiii/lite:latest
 ```
 
-固定使用当前正式版时，将镜像标签改为 `ghcr.io/nuomiiiii/lite:2.3.5`。
+固定使用当前正式版时，将镜像标签改为 `ghcr.io/nuomiiiii/lite:2.3.6`。
 
 更新 Docker 部署前请先备份 `data` 目录，然后拉取新镜像并使用原来的端口和数据挂载重新创建容器：
 
@@ -108,7 +107,7 @@ chmod +x Lite-linux-amd64
 
 ## Agent 与远程管理
 
-Lite `2.3.5` 推荐配套 [Lite-agent `2.3.3.5`](https://github.com/nuomiiiii/Lite-agent/releases/tag/2.3.3.5)。先在后台添加节点，再打开该节点的“节点配置 → 部署指令”，复制完整命令到目标服务器执行。自动发现注册已下线，新安装和 Docker 重建均使用具体节点的部署指令。
+Lite `2.3.6` 推荐配套 [Lite-agent `2.3.3.5`](https://github.com/nuomiiiii/Lite-agent/releases/tag/2.3.3.5)。先在后台添加节点，再打开该节点的“节点配置 → 部署指令”，复制完整命令到目标服务器执行。自动发现注册已下线，新安装和 Docker 重建均使用具体节点的部署指令。
 
 远程终端、文件管理和远程执行需要同时开启 Lite“系统设置 → 通用 → 允许远程管理”与 Agent 本地 `--enable-remote-control`，新安装默认关闭。进入远程功能时，已启用通行密钥的账号可用通行密钥验证；已启用两步验证但未使用通行密钥时输入当前验证码；未启用时重新输入管理员密码。
 

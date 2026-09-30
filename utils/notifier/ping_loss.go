@@ -11,11 +11,11 @@ import (
 	"github.com/nuomiiiii/lite/database/dbcore"
 	"github.com/nuomiiiii/lite/database/metricstore"
 	"github.com/nuomiiiii/lite/database/models"
-	messageevent "github.com/nuomiiiii/lite/database/models/messageEvent"
 	"github.com/nuomiiiii/lite/pkg/config"
 	"github.com/nuomiiiii/lite/pkg/corn"
 	"github.com/nuomiiiii/lite/pkg/metric"
 	"github.com/nuomiiiii/lite/utils/messageSender"
+	"gorm.io/gorm"
 )
 
 const pingLossCheckInterval = 15 * time.Second
@@ -24,12 +24,19 @@ var pingLossCheckMu sync.Mutex
 
 type pingLossStats = metricstore.PingLossStats
 
+type pingBaselineCandidateQuery func(ctx context.Context, store *metric.Store, clientUUID string, taskID uint, start, end time.Time) (metricstore.PingBaselineCandidate, error)
+
+var queryPingBaselineCandidate pingBaselineCandidateQuery = metricstore.QueryPingBaselineCandidate
+
+var sendPingHealthEvent = messageSender.SendEvent
+
 type pingLossNotificationAction uint8
 
 const (
 	pingLossNotificationNone pingLossNotificationAction = iota
 	pingLossNotificationAlert
 	pingLossNotificationRecovery
+	pingLossNotificationSilentEnd
 )
 
 func InitPingLossNotificationSchedule() {
@@ -64,27 +71,61 @@ func CheckPingLossNotifications() {
 
 	now := time.Now().UTC()
 	for _, notification := range notifications {
-		windowStart := now.Add(-time.Duration(notification.WindowSeconds) * time.Second)
-		stats, err := getPingLossStatsWithStore(context.Background(), store, notification.Client, notification.TaskId, windowStart, now)
-		if err != nil {
-			log.Printf("Failed to compute ping loss for notification %d: %v", notification.Id, err)
-			continue
-		}
-		action := evaluatePingLossNotification(notification, stats, now)
-		if action == pingLossNotificationNone {
-			continue
+		lossStats := pingLossStats{}
+		lossAction := pingLossNotificationNone
+		if notification.LossEnabled {
+			windowStart := now.Add(-time.Duration(notification.WindowSeconds) * time.Second)
+			stats, err := getPingLossStatsWithStore(context.Background(), store, notification.Client, notification.TaskId, windowStart, now)
+			if err != nil {
+				log.Printf("Failed to compute ping loss for notification %d: %v", notification.Id, err)
+			} else {
+				lossStats = stats
+				lossAction = evaluatePingLossNotification(notification, stats, now)
+			}
 		}
 
-		if err := sendPingLossNotification(notification, stats, now, action); err != nil {
-			log.Printf("Failed to send ping loss notification %d: %v", notification.Id, err)
+		latencyStats := metricstore.PingHealthStats{}
+		latencyEval := pingLatencyEvaluation{Notification: notification, Action: pingLatencyNotificationNone}
+		latencyEvaluated := false
+		if notification.LatencyEnabled {
+			windowStart := now.Add(-time.Duration(notification.LatencyWindowSeconds) * time.Second)
+			stats, err := metricstore.QueryPingHealthStats(context.Background(), store, notification.Client, notification.TaskId, windowStart, now)
+			if err != nil {
+				log.Printf("Failed to compute ping latency for notification %d: %v", notification.Id, err)
+			} else {
+				latencyStats = stats
+				prepared, candidate, _, baselineErr := loadAdaptiveBaselineCandidate(context.Background(), store, notification, now)
+				if baselineErr != nil {
+					log.Printf("Failed to compute ping baseline for notification %d: %v", notification.Id, baselineErr)
+					candidate = metricstore.PingBaselineCandidate{}
+				}
+				latencyEval = evaluateLatencyAnomaly(prepared, stats, candidate, windowStart, now, notification.Task.Interval)
+				latencyEvaluated = true
+			}
+		}
+
+		lossSent := true
+		if pingLossActionRequiresSend(lossAction) {
+			if err := sendPingLossNotification(notification, lossStats, now, lossAction); err != nil {
+				lossSent = false
+				log.Printf("Failed to send ping loss notification %d: %v", notification.Id, err)
+			}
+		}
+		latencySent := true
+		if pingLatencyActionRequiresSend(latencyEval.Action) {
+			if err := sendPingLatencyNotification(latencyEval.Notification, latencyStats, now, latencyEval.Action); err != nil {
+				latencySent = false
+				log.Printf("Failed to send ping latency notification %d: %v", notification.Id, err)
+			}
+		}
+
+		updates := pingHealthPersistentUpdates(notification, now, lossAction, lossSent, latencyEval, latencyEvaluated, latencySent)
+		if len(updates) == 0 {
 			continue
 		}
 		if err := db.Model(&models.PingLossNotification{}).
 			Where("id = ?", notification.Id).
-			Updates(map[string]any{
-				"last_notified": now,
-				"alert_active":  action == pingLossNotificationAlert,
-			}).Error; err != nil {
+			Updates(pingHealthSQLUpdates(updates)).Error; err != nil {
 			log.Printf("Failed to update ping loss notification %d: %v", notification.Id, err)
 		}
 	}
@@ -95,14 +136,17 @@ func getPingLossStatsWithStore(ctx context.Context, store *metric.Store, clientU
 }
 
 func evaluatePingLossNotification(notification models.PingLossNotification, stats pingLossStats, now time.Time) pingLossNotificationAction {
-	if !notification.Enable || stats.Total < int64(notification.MinimumSamples) {
+	if !notification.Enable || !notification.LossEnabled || stats.Total < int64(notification.MinimumSamples) {
 		return pingLossNotificationNone
 	}
 	if stats.LossRate() <= notification.LossThreshold {
-		if notification.AlertActive {
-			return pingLossNotificationRecovery
+		if !notification.AlertActive {
+			return pingLossNotificationNone
 		}
-		return pingLossNotificationNone
+		if !notification.LossIncidentNotified {
+			return pingLossNotificationSilentEnd
+		}
+		return pingLossNotificationRecovery
 	}
 	if notification.AlertActive && notification.LastNotified != nil && now.Before(notification.LastNotified.Add(time.Duration(notification.CooldownSeconds)*time.Second)) {
 		return pingLossNotificationNone
@@ -123,10 +167,7 @@ func formatPingLossMessage(notification models.PingLossNotification, stats pingL
 	if target == "" {
 		target = "-"
 	}
-	heading := "延迟监测异常"
-	if action == pingLossNotificationRecovery {
-		heading = "延迟监测恢复"
-	}
+	heading := pingLossEventTitle(action)
 	return fmt.Sprintf(
 		"%s\n服务器：%s\n检测任务：%s\n检测目标：%s\n统计窗口：最近 %s\n丢包：%.2f%%（%d/%d）\n告警阈值：%.2f%%",
 		heading,
@@ -141,6 +182,24 @@ func formatPingLossMessage(notification models.PingLossNotification, stats pingL
 	)
 }
 
+func sendPingLatencyNotification(notification models.PingLossNotification, stats metricstore.PingHealthStats, now time.Time, action pingLatencyNotificationAction) error {
+	client := notification.ClientInfo
+	if client.UUID == "" {
+		client.UUID = notification.Client
+	}
+	emoji := "⚠️"
+	if action == pingLatencyNotificationRecovery {
+		emoji = "✅"
+	}
+	return sendPingHealthEvent(models.EventMessage{
+		Event:   pingLatencyEventTitle(action),
+		Clients: []models.Client{client},
+		Time:    now,
+		Emoji:   emoji,
+		Message: formatPingLatencyMessage(notification, stats, action),
+	})
+}
+
 func sendPingLossNotification(notification models.PingLossNotification, stats pingLossStats, now time.Time, action pingLossNotificationAction) error {
 	client := notification.ClientInfo
 	if client.UUID == "" {
@@ -150,13 +209,161 @@ func sendPingLossNotification(notification models.PingLossNotification, stats pi
 	if action == pingLossNotificationRecovery {
 		emoji = "✅"
 	}
-	return messageSender.SendEvent(models.EventMessage{
-		Event:   messageevent.PingLoss,
+	return sendPingHealthEvent(models.EventMessage{
+		Event:   pingLossEventTitle(action),
 		Clients: []models.Client{client},
 		Time:    now,
 		Emoji:   emoji,
 		Message: formatPingLossMessage(notification, stats, action),
 	})
+}
+
+func pingLossEventTitle(action pingLossNotificationAction) string {
+	if action == pingLossNotificationRecovery {
+		return "延迟监测告警 · 丢包恢复"
+	}
+	return "延迟监测告警 · 丢包异常"
+}
+
+func pingLatencyEventTitle(action pingLatencyNotificationAction) string {
+	if action == pingLatencyNotificationRecovery {
+		return "延迟监测告警 · 延迟恢复"
+	}
+	return "延迟监测告警 · 延迟异常"
+}
+
+func loadAdaptiveBaselineCandidate(
+	ctx context.Context,
+	store *metric.Store,
+	notification models.PingLossNotification,
+	now time.Time,
+) (models.PingLossNotification, metricstore.PingBaselineCandidate, bool, error) {
+	next := notification
+	candidate := metricstore.PingBaselineCandidate{}
+	if !next.AdaptiveBaselineEnabled {
+		return next, candidate, false, nil
+	}
+	fp := models.AdaptiveBaselineFingerprint(
+		next.Task.Type,
+		next.Task.Target,
+		next.BaselineWindowSeconds,
+		next.BaselineMinimumSamples,
+	)
+	if next.AdaptiveBaselineFingerprint != "" && next.AdaptiveBaselineFingerprint != fp {
+		resetLatencyIdentity(&next, now, fp)
+	}
+	if !needsAdaptiveBaselineCandidate(next) {
+		return next, candidate, false, nil
+	}
+	start, end := metricstore.AdaptiveBaselineRange(now, next.LatencyWindowSeconds, next.BaselineWindowSeconds, next.AdaptiveBaselineStartedAt)
+	if !metricstore.AdaptiveBaselineRangeValid(start, end) {
+		return next, candidate, false, nil
+	}
+	loaded, err := queryPingBaselineCandidate(ctx, store, next.Client, next.TaskId, start, end)
+	if err != nil {
+		return next, candidate, true, err
+	}
+	return next, loaded, true, nil
+}
+
+func pingHealthPersistentUpdates(
+	previous models.PingLossNotification,
+	now time.Time,
+	lossAction pingLossNotificationAction,
+	lossSent bool,
+	eval pingLatencyEvaluation,
+	latencyEvaluated bool,
+	latencySent bool,
+) map[string]any {
+	updates := map[string]any{}
+
+	switch lossAction {
+	case pingLossNotificationAlert:
+		updates["alert_active"] = true
+		if lossSent {
+			updates["loss_incident_notified"] = true
+			updates["last_notified"] = now
+		} else if !previous.LossIncidentNotified {
+			updates["loss_incident_notified"] = false
+			updates["last_notified"] = nil
+		}
+	case pingLossNotificationRecovery:
+		if lossSent {
+			updates["alert_active"] = false
+			updates["loss_incident_notified"] = false
+			updates["last_notified"] = now
+		}
+	case pingLossNotificationSilentEnd:
+		updates["alert_active"] = false
+		updates["loss_incident_notified"] = false
+	}
+
+	if latencyEvaluated {
+		next := eval.Notification
+		if eval.Action == pingLatencyNotificationRecovery && !latencySent {
+			next.LatencyAlertState = previous.LatencyAlertState
+			next.LatencyActiveSince = previous.LatencyActiveSince
+			next.AdaptiveBaselineStatus = previous.AdaptiveBaselineStatus
+			next.AdaptiveBaselineResumeAt = previous.AdaptiveBaselineResumeAt
+			next.AdaptiveBaselineMs = previous.AdaptiveBaselineMs
+			next.LatencyIncidentNotified = previous.LatencyIncidentNotified
+		}
+		for key, value := range latencyRuntimeUpdates(previous, next) {
+			updates[key] = value
+		}
+		if latencySent && pingLatencyActionRequiresSend(eval.Action) {
+			updates["latency_last_notified"] = now
+			if eval.Action != pingLatencyNotificationRecovery {
+				updates["latency_incident_notified"] = true
+			} else {
+				updates["latency_incident_notified"] = false
+			}
+		} else if latencyNotificationStartsNewIncident(eval.Action) && !latencySent {
+			updates["latency_last_notified"] = nil
+			updates["latency_incident_notified"] = false
+		} else if eval.Action == pingLatencyNotificationSilentEnd {
+			updates["latency_incident_notified"] = false
+		}
+	}
+
+	return updates
+}
+
+func pingLossActionRequiresSend(action pingLossNotificationAction) bool {
+	return action == pingLossNotificationAlert || action == pingLossNotificationRecovery
+}
+
+func pingLatencyActionRequiresSend(action pingLatencyNotificationAction) bool {
+	switch action {
+	case pingLatencyNotificationAlertHigh, pingLatencyNotificationAlertLow,
+		pingLatencyNotificationPersist, pingLatencyNotificationRecovery,
+		pingLatencyNotificationFlipHigh, pingLatencyNotificationFlipLow:
+		return true
+	default:
+		return false
+	}
+}
+
+func latencyNotificationStartsNewIncident(action pingLatencyNotificationAction) bool {
+	switch action {
+	case pingLatencyNotificationAlertHigh, pingLatencyNotificationAlertLow,
+		pingLatencyNotificationFlipHigh, pingLatencyNotificationFlipLow:
+		return true
+	default:
+		return false
+	}
+}
+
+func pingHealthSQLUpdates(updates map[string]any) map[string]any {
+	sqlUpdates := make(map[string]any, len(updates))
+	for key, value := range updates {
+		if value == nil {
+			sqlUpdates[key] = gorm.Expr("NULL")
+			continue
+		}
+		sqlUpdates[key] = value
+	}
+	return sqlUpdates
 }
 
 func formatPingLossWindow(seconds int) string {

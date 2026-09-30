@@ -295,6 +295,8 @@ func registerAdminRoutes(r *gin.Engine) {
 			pingLoss.POST("/delete", jsonRpc.Bind("admin:deletePingLossNotifications"))
 			pingLoss.GET("/default", jsonRpc.Bind("admin:getPingLossNotificationDefault"))
 			pingLoss.POST("/default", jsonRpc.Bind("admin:setPingLossNotificationDefault"))
+			pingLoss.GET("/latency-default", jsonRpc.Bind("admin:getLatencyAnomalyNotificationDefault"))
+			pingLoss.POST("/latency-default", jsonRpc.Bind("admin:setLatencyAnomalyNotificationDefault"))
 		}
 	}
 

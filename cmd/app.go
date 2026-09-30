@@ -893,7 +893,7 @@ func registerScheduledWork() {
 	if err := corn.AddFunc("notifier:traffic", "@every 1m", notifier.CheckTraffic); err != nil {
 		logger.ErrorArgs("server", "Failed to add traffic notification task:", err)
 	}
-	if err := corn.AddFuncInLocation("notifier:renewal", "0 1 0 * * *", timeutil.BeijingLocation, notifier.CheckAutoRenewalScheduledWork); err != nil {
+	if err := corn.AddFunc("notifier:renewal", "@every 1m", notifier.CheckAutoRenewalScheduledWork); err != nil {
 		logger.ErrorArgs("server", "Failed to add auto-renewal scheduled task:", err)
 	}
 	if err := corn.AddFuncInLocation("notifier:expire", "0 0 9 * * *", timeutil.BeijingLocation, notifier.CheckExpireScheduledWork); err != nil {

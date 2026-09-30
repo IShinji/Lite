@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nuomiiiii/lite/database"
+	"github.com/nuomiiiii/lite/database/billing"
 	"github.com/nuomiiiii/lite/database/clients"
 	"github.com/nuomiiiii/lite/database/dbcore"
 	"github.com/nuomiiiii/lite/database/models"
@@ -232,6 +233,9 @@ func getNodes(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcEr
 	isAdmin := isLoginFromCtx(ctx)
 	sendIPAddrToGuest, _ := config.GetAs[bool](config.SendIpAddrToGuestKey)
 	nodes := presentThemeNodes(cinfo, isAdmin, sendIPAddrToGuest)
+	if remaining, err := billing.RemainingByClient(ctx, dbcore.GetDBInstance(), time.Now().UTC()); err == nil {
+		applyThemeRemainingValues(nodes, remaining)
+	}
 	if params.UUID != "" {
 		node, ok := themeNodeByUUID(nodes, params.UUID)
 		if !ok {
@@ -419,6 +423,7 @@ func getMe(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) 
 		UUID         string `json:"uuid"`
 		Language     string `json:"language"`
 		Color        string `json:"color"`
+		AvatarURL    string `json:"avatar_url,omitempty"`
 	}
 
 	meta := rpc.MetaFromContext(ctx)
@@ -443,6 +448,7 @@ func getMe(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) 
 		resp.UUID = meta.User.UUID
 		resp.Language = meta.User.Language
 		resp.Color = meta.User.Color
+		resp.AvatarURL = accountAvatarURL(meta.User.AvatarVersion)
 		return resp, nil
 	case rpc.PrincipalAnonymous:
 		resp.LoggedIn = false

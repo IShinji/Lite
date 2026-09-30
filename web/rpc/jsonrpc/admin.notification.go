@@ -47,6 +47,8 @@ func init() {
 	reg("deletePingLossNotifications", adminDeletePingLossNotifications, "Delete ping loss notifications")
 	reg("getPingLossNotificationDefault", adminGetPingLossNotificationDefault, "Get the default ping loss notification for new clients")
 	reg("setPingLossNotificationDefault", adminSetPingLossNotificationDefault, "Set the default ping loss notification for new clients")
+	reg("getLatencyAnomalyNotificationDefault", adminGetLatencyAnomalyNotificationDefault, "Get the default latency anomaly notification for new clients")
+	reg("setLatencyAnomalyNotificationDefault", adminSetLatencyAnomalyNotificationDefault, "Set the default latency anomaly notification for new clients")
 }
 
 // reg 是 admin 命名空间方法的注册便捷封装。
@@ -315,7 +317,7 @@ func adminListPingLossNotifications(_ context.Context, _ *rpc.JsonRpcRequest) (a
 	return list, nil
 }
 
-func adminAddPingLossNotification(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+func adminAddPingLossNotification(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	var params models.PingLossNotification
 	if err := req.BindParams(&params); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request body: "+err.Error(), nil)
@@ -324,10 +326,12 @@ func adminAddPingLossNotification(_ context.Context, req *rpc.JsonRpcRequest) (a
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
 	}
+	params.Id = 0
+	recordPingLossSaves(ctx, []*models.PingLossNotification{&params})
 	return map[string]any{"id": id}, nil
 }
 
-func adminEditPingLossNotifications(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+func adminEditPingLossNotifications(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	var params struct {
 		Notifications []*models.PingLossNotification `json:"notifications"`
 	}
@@ -337,10 +341,11 @@ func adminEditPingLossNotifications(_ context.Context, req *rpc.JsonRpcRequest) 
 	if err := notification.EditPingLossNotifications(params.Notifications); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
 	}
+	recordPingLossSaves(ctx, params.Notifications)
 	return nil, nil
 }
 
-func adminUpsertPingLossNotifications(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+func adminUpsertPingLossNotifications(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	var params struct {
 		Notifications []*models.PingLossNotification `json:"notifications"`
 	}
@@ -350,19 +355,23 @@ func adminUpsertPingLossNotifications(_ context.Context, req *rpc.JsonRpcRequest
 	if err := notification.UpsertPingLossNotifications(params.Notifications); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
 	}
+	recordPingLossSaves(ctx, params.Notifications)
 	return nil, nil
 }
 
-func adminDeletePingLossNotifications(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+func adminDeletePingLossNotifications(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	var params struct {
 		ID []uint `json:"id"`
 	}
 	if err := req.BindParams(&params); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request body: "+err.Error(), nil)
 	}
+	subjects := loadPingLossAuditSubjects(params.ID)
 	if err := notification.DeletePingLossNotifications(params.ID); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, err.Error(), nil)
 	}
+	level, key, auditParams := pingLossDeleteAudit(subjects)
+	writePingLossAudit(ctx, level, key, auditParams)
 	return nil, nil
 }
 
@@ -374,7 +383,7 @@ func adminGetPingLossNotificationDefault(_ context.Context, _ *rpc.JsonRpcReques
 	return value, nil
 }
 
-func adminSetPingLossNotificationDefault(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+func adminSetPingLossNotificationDefault(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	var value notificationdefaults.PingLossNotificationDefaultConfig
 	if err := req.BindParams(&value); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request body: "+err.Error(), nil)
@@ -382,5 +391,26 @@ func adminSetPingLossNotificationDefault(_ context.Context, req *rpc.JsonRpcRequ
 	if err := notificationdefaults.SetPingLossNotificationDefaultConfig(value); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
 	}
+	recordPingLossDefault(ctx, "audit.ping_loss_default")
+	return value, nil
+}
+
+func adminGetLatencyAnomalyNotificationDefault(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	value, err := notificationdefaults.GetLatencyAnomalyNotificationDefaultConfig()
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, err.Error(), nil)
+	}
+	return value, nil
+}
+
+func adminSetLatencyAnomalyNotificationDefault(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	var value notificationdefaults.LatencyAnomalyNotificationDefaultConfig
+	if err := req.BindParams(&value); err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request body: "+err.Error(), nil)
+	}
+	if err := notificationdefaults.SetLatencyAnomalyNotificationDefaultConfig(value); err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
+	}
+	recordPingLossDefault(ctx, "audit.ping_latency_default")
 	return value, nil
 }

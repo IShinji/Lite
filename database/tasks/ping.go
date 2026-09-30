@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/nuomiiiii/lite/database/dbcore"
@@ -39,6 +40,10 @@ func addPingTask(db *gorm.DB, clients []string, defaultOn bool, name string, tar
 	if err != nil {
 		return 0, err
 	}
+	latencyDefault, err := notificationdefaults.GetLatencyAnomalyNotificationDefaultConfig()
+	if err != nil {
+		return 0, err
+	}
 	err = db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&task).Error; err != nil {
 			return err
@@ -52,7 +57,7 @@ func addPingTask(db *gorm.DB, clients []string, defaultOn bool, name string, tar
 		if result.RowsAffected == 0 {
 			return gorm.ErrRecordNotFound
 		}
-		return notificationdefaults.ApplyLoadedPingLossDefaultsToTaskClients(tx, pingLossDefault, task.Id, normalizedClients)
+		return notificationdefaults.ApplyLoadedPingHealthDefaultsToTaskClients(tx, pingLossDefault, latencyDefault, task.Id, normalizedClients)
 	})
 	if err != nil {
 		return 0, err
@@ -149,6 +154,7 @@ func editPingTasks(db *gorm.DB, tasks []*models.PingTask) ([]metricstore.PingAss
 		clients []string
 	}
 	pendingDefaults := make([]pendingPingLossDefault, 0)
+	identityChangedTasks := make([]models.PingTask, 0)
 	err := db.Transaction(func(tx *gorm.DB) error {
 		hasLegacyPingRecords := tx.Migrator().HasTable("ping_records")
 		for _, task := range tasks {
@@ -156,7 +162,7 @@ func editPingTasks(db *gorm.DB, tasks []*models.PingTask) ([]metricstore.PingAss
 				return fmt.Errorf("ping task ID is required")
 			}
 			var existing models.PingTask
-			if err := tx.Select("id", "clients").Where("id = ?", task.Id).First(&existing).Error; err != nil {
+			if err := tx.Select("id", "clients", "type", "target").Where("id = ?", task.Id).First(&existing).Error; err != nil {
 				return err
 			}
 			task.Clients = normalizePingClients(task.Clients)
@@ -170,6 +176,14 @@ func editPingTasks(db *gorm.DB, tasks []*models.PingTask) ([]metricstore.PingAss
 				"interval":    task.Interval,
 			}).Error; err != nil {
 				return err
+			}
+			if pingTaskIdentityChanged(existing, *task) {
+				identityChangedTasks = append(identityChangedTasks, models.PingTask{
+					Id: task.Id, Type: task.Type, Target: task.Target,
+				})
+				if err := resetPingLossLearningForTaskIdentity(tx, *task, time.Now().UTC()); err != nil {
+					return err
+				}
 			}
 			removedClients := removedPingTaskClients(existing.Clients, task.Clients)
 			addedClients := addedPingTaskClients(existing.Clients, task.Clients)
@@ -204,10 +218,19 @@ func editPingTasks(db *gorm.DB, tasks []*models.PingTask) ([]metricstore.PingAss
 		if defaultErr != nil {
 			return nil, defaultErr
 		}
+		latencyDefault, defaultErr := notificationdefaults.GetLatencyAnomalyNotificationDefaultConfig()
+		if defaultErr != nil {
+			return nil, defaultErr
+		}
 		for _, pending := range pendingDefaults {
-			if err := notificationdefaults.ApplyLoadedPingLossDefaultsToTaskClients(db, pingLossDefault, pending.taskID, pending.clients); err != nil {
+			if err := notificationdefaults.ApplyLoadedPingHealthDefaultsToTaskClients(db, pingLossDefault, latencyDefault, pending.taskID, pending.clients); err != nil {
 				return nil, err
 			}
+		}
+	}
+	for _, changed := range identityChangedTasks {
+		if err := resetPingLossLearningForTaskIdentity(db, changed, time.Now().UTC()); err != nil {
+			return nil, err
 		}
 	}
 	// Keep just-removed client/task series closed across cleanup retries. The
@@ -216,6 +239,45 @@ func editPingTasks(db *gorm.DB, tasks []*models.PingTask) ([]metricstore.PingAss
 	// the same series and then be erased by a later retry.
 	metricstore.BlockPingAssignmentWrites(removedAssignments)
 	return removedAssignments, nil
+}
+
+func pingTaskIdentityChanged(existing, next models.PingTask) bool {
+	return strings.TrimSpace(existing.Type) != strings.TrimSpace(next.Type) ||
+		strings.TrimSpace(existing.Target) != strings.TrimSpace(next.Target)
+}
+
+func resetPingLossLearningForTaskIdentity(tx *gorm.DB, task models.PingTask, now time.Time) error {
+	if tx == nil {
+		return fmt.Errorf("db is required")
+	}
+	if task.Id == 0 {
+		return fmt.Errorf("ping task ID is required")
+	}
+	var rules []models.PingLossNotification
+	if err := tx.Where("task_id = ?", task.Id).Find(&rules).Error; err != nil {
+		return err
+	}
+	for i := range rules {
+		fp := models.AdaptiveBaselineFingerprint(task.Type, task.Target, rules[i].BaselineWindowSeconds, rules[i].BaselineMinimumSamples)
+		if err := tx.Model(&models.PingLossNotification{}).
+			Where("id = ?", rules[i].Id).
+			Updates(map[string]any{
+				"latency_alert_state":            models.LatencyAlertNormal,
+				"latency_incident_notified":      false,
+				"latency_active_since":           nil,
+				"latency_last_notified":          nil,
+				"adaptive_baseline_ms":           nil,
+				"adaptive_baseline_status":       models.AdaptiveBaselineWarming,
+				"adaptive_baseline_sample_count": 0,
+				"adaptive_baseline_updated_at":   nil,
+				"adaptive_baseline_resume_at":    nil,
+				"adaptive_baseline_fingerprint":  fp,
+				"adaptive_baseline_started_at":   now.UTC(),
+			}).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func editedPingTaskIDs(tasks []*models.PingTask) []uint {

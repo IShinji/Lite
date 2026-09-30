@@ -23,6 +23,18 @@ type PingLossNotificationDefaultConfig struct {
 	CooldownSeconds int     `json:"cooldown_seconds"`
 }
 
+type LatencyAnomalyNotificationDefaultConfig struct {
+	SchemaVersion          int     `json:"schema_version"`
+	Enabled                bool    `json:"enabled"`
+	WindowSeconds          int     `json:"window_seconds"`
+	MinimumSamples         int     `json:"minimum_samples"`
+	CooldownSeconds        int     `json:"cooldown_seconds"`
+	LowerDeviationPercent  float64 `json:"lower_deviation_percent"`
+	UpperDeviationPercent  float64 `json:"upper_deviation_percent"`
+	BaselineWindowSeconds  int     `json:"baseline_window_seconds"`
+	BaselineMinimumSamples int     `json:"baseline_minimum_samples"`
+}
+
 type TrafficReportDefaultConfig struct {
 	Enabled        bool `json:"enabled"`
 	Daily          bool `json:"daily"`
@@ -43,6 +55,18 @@ var defaultPingLossNotificationConfig = PingLossNotificationDefaultConfig{
 	LossThreshold:   5,
 	MinimumSamples:  1,
 	CooldownSeconds: 300,
+}
+
+var defaultLatencyAnomalyNotificationConfig = LatencyAnomalyNotificationDefaultConfig{
+	SchemaVersion:          2,
+	Enabled:                false,
+	WindowSeconds:          300,
+	MinimumSamples:         30,
+	CooldownSeconds:        1800,
+	LowerDeviationPercent:  25,
+	UpperDeviationPercent:  25,
+	BaselineWindowSeconds:  86400,
+	BaselineMinimumSamples: 30,
 }
 
 var defaultTrafficReportConfig = TrafficReportDefaultConfig{
@@ -84,6 +108,47 @@ func SetPingLossNotificationDefaultConfig(value PingLossNotificationDefaultConfi
 	return config.Set(config.PingLossNotificationDefaultKey, value)
 }
 
+func GetLatencyAnomalyNotificationDefaultConfig() (LatencyAnomalyNotificationDefaultConfig, error) {
+	value, err := config.GetAs[LatencyAnomalyNotificationDefaultConfig](config.LatencyAnomalyNotificationDefaultKey, defaultLatencyAnomalyNotificationConfig)
+	if err != nil {
+		return LatencyAnomalyNotificationDefaultConfig{}, err
+	}
+	upgraded, changed := normalizeLatencyAnomalyDefault(value)
+	if !changed {
+		return upgraded, nil
+	}
+	if err := config.Set(config.LatencyAnomalyNotificationDefaultKey, upgraded); err != nil {
+		return LatencyAnomalyNotificationDefaultConfig{}, err
+	}
+	return upgraded, nil
+}
+
+// normalizeLatencyAnomalyDefault moves an untouched previous factory default
+// (3 successful samples, 20% deviation) onto the current default.
+func normalizeLatencyAnomalyDefault(value LatencyAnomalyNotificationDefaultConfig) (LatencyAnomalyNotificationDefaultConfig, bool) {
+	if value.SchemaVersion >= 2 {
+		return value, false
+	}
+	if value.MinimumSamples != 3 || value.LowerDeviationPercent != 20 || value.UpperDeviationPercent != 20 {
+		return value, false
+	}
+	value.SchemaVersion = defaultLatencyAnomalyNotificationConfig.SchemaVersion
+	value.MinimumSamples = defaultLatencyAnomalyNotificationConfig.MinimumSamples
+	value.LowerDeviationPercent = defaultLatencyAnomalyNotificationConfig.LowerDeviationPercent
+	value.UpperDeviationPercent = defaultLatencyAnomalyNotificationConfig.UpperDeviationPercent
+	return value, true
+}
+
+func SetLatencyAnomalyNotificationDefaultConfig(value LatencyAnomalyNotificationDefaultConfig) error {
+	if err := validateLatencyAnomalyNotificationDefaultConfig(value); err != nil {
+		return err
+	}
+	if value.SchemaVersion == 0 {
+		value.SchemaVersion = defaultLatencyAnomalyNotificationConfig.SchemaVersion
+	}
+	return config.Set(config.LatencyAnomalyNotificationDefaultKey, value)
+}
+
 func GetTrafficReportDefaultConfig() (TrafficReportDefaultConfig, error) {
 	return config.GetAs[TrafficReportDefaultConfig](config.TrafficReportDefaultKey, defaultTrafficReportConfig)
 }
@@ -107,6 +172,31 @@ func validatePingLossNotificationDefaultConfig(value PingLossNotificationDefault
 	}
 	if value.CooldownSeconds < 60 || value.CooldownSeconds > 7*24*60*60 {
 		return fmt.Errorf("cooldown must be between 60 and 604800 seconds")
+	}
+	return nil
+}
+
+func validateLatencyAnomalyNotificationDefaultConfig(value LatencyAnomalyNotificationDefaultConfig) error {
+	if value.WindowSeconds < 60 || value.WindowSeconds > 24*60*60 {
+		return fmt.Errorf("latency window must be between 60 and 86400 seconds")
+	}
+	if value.MinimumSamples < 1 || value.MinimumSamples > 100000 {
+		return fmt.Errorf("latency minimum samples must be between 1 and 100000")
+	}
+	if value.CooldownSeconds < 60 || value.CooldownSeconds > 7*24*60*60 {
+		return fmt.Errorf("latency cooldown must be between 60 and 604800 seconds")
+	}
+	if value.LowerDeviationPercent <= 0 || value.LowerDeviationPercent >= 100 {
+		return fmt.Errorf("lower deviation percent must be greater than 0 and less than 100")
+	}
+	if value.UpperDeviationPercent <= 0 || value.UpperDeviationPercent > 1000 {
+		return fmt.Errorf("upper deviation percent must be greater than 0 and at most 1000")
+	}
+	if value.BaselineWindowSeconds < value.WindowSeconds || value.BaselineWindowSeconds > 30*24*60*60 {
+		return fmt.Errorf("baseline window must be between the latency window and 30 days")
+	}
+	if value.BaselineMinimumSamples < 1 || value.BaselineMinimumSamples > 1000000 {
+		return fmt.Errorf("baseline minimum samples must be between 1 and 1000000")
 	}
 	return nil
 }
@@ -144,6 +234,10 @@ func applyDefaultsToNewClient(db *gorm.DB, clientUUID string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("load ping loss notification default: %w", err)
 	}
+	latencyConfig, err := GetLatencyAnomalyNotificationDefaultConfig()
+	if err != nil {
+		return false, fmt.Errorf("load latency anomaly notification default: %w", err)
+	}
 	trafficReportConfig, err := GetTrafficReportDefaultConfig()
 	if err != nil {
 		return false, fmt.Errorf("load traffic report default: %w", err)
@@ -165,7 +259,7 @@ func applyDefaultsToNewClient(db *gorm.DB, clientUUID string) (bool, error) {
 			}
 		}
 
-		if pingLossConfig.Enabled {
+		if pingLossConfig.Enabled || latencyConfig.Enabled {
 			var pingTasks []models.PingTask
 			if err := tx.Where("clients LIKE ?", `%"`+clientUUID+`"%`).Find(&pingTasks).Error; err != nil {
 				return fmt.Errorf("find ping tasks for notification defaults: %w", err)
@@ -174,7 +268,7 @@ func applyDefaultsToNewClient(db *gorm.DB, clientUUID string) (bool, error) {
 				if !task.AppliesToClient(clientUUID) {
 					continue
 				}
-				if err := applyPingLossDefaultToClients(tx, pingLossConfig, task.Id, []string{clientUUID}); err != nil {
+				if err := applyPingHealthDefaultToClients(tx, pingLossConfig, latencyConfig, task.Id, []string{clientUUID}); err != nil {
 					return err
 				}
 			}
@@ -206,16 +300,32 @@ func applyDefaultsToNewClient(db *gorm.DB, clientUUID string) (bool, error) {
 	return trafficReportApplied, err
 }
 
-// ApplyPingLossDefaultsToTaskClients 把已保存的延迟监测告警默认配置套到新的任务/服务器组合上，已有告警行保持不变。
-
-// ApplyLoadedPingLossDefaultsToTaskClients 使用已经读好的默认配置写入新的任务/服务器组合。
-// 调用方必须在事务外完成 GetPingLossNotificationDefaultConfig，避免 SQLite 单连接卡死。
-func ApplyLoadedPingLossDefaultsToTaskClients(db *gorm.DB, cfg PingLossNotificationDefaultConfig, taskID uint, clients []string) error {
-	return applyPingLossDefaultToClients(db, cfg, taskID, clients)
+// ApplyLoadedPingHealthDefaultsToTaskClients 使用已经读好的丢包/延迟默认配置写入新的任务/服务器组合。
+// 调用方必须在事务外完成配置读取，避免 SQLite 单连接卡死。
+func ApplyLoadedPingHealthDefaultsToTaskClients(
+	db *gorm.DB,
+	lossCfg PingLossNotificationDefaultConfig,
+	latencyCfg LatencyAnomalyNotificationDefaultConfig,
+	taskID uint,
+	clients []string,
+) error {
+	return applyPingHealthDefaultToClients(db, lossCfg, latencyCfg, taskID, clients)
 }
 
-func applyPingLossDefaultToClients(tx *gorm.DB, cfg PingLossNotificationDefaultConfig, taskID uint, clients []string) error {
-	if tx == nil || !cfg.Enabled || taskID == 0 {
+// ApplyLoadedPingLossDefaultsToTaskClients keeps the previous helper for callers
+// that only loaded the packet-loss default. Latency defaults stay off.
+func ApplyLoadedPingLossDefaultsToTaskClients(db *gorm.DB, cfg PingLossNotificationDefaultConfig, taskID uint, clients []string) error {
+	return applyPingHealthDefaultToClients(db, cfg, defaultLatencyAnomalyNotificationConfig, taskID, clients)
+}
+
+func applyPingHealthDefaultToClients(
+	tx *gorm.DB,
+	lossCfg PingLossNotificationDefaultConfig,
+	latencyCfg LatencyAnomalyNotificationDefaultConfig,
+	taskID uint,
+	clients []string,
+) error {
+	if tx == nil || taskID == 0 || (!lossCfg.Enabled && !latencyCfg.Enabled) {
 		return nil
 	}
 	seen := make(map[string]struct{}, len(clients))
@@ -228,22 +338,38 @@ func applyPingLossDefaultToClients(tx *gorm.DB, cfg PingLossNotificationDefaultC
 		}
 		seen[clientUUID] = struct{}{}
 		candidate := models.PingLossNotification{
-			Client:          clientUUID,
-			TaskId:          taskID,
-			Enable:          true,
-			WindowSeconds:   cfg.WindowSeconds,
-			LossThreshold:   cfg.LossThreshold,
-			MinimumSamples:  cfg.MinimumSamples,
-			CooldownSeconds: cfg.CooldownSeconds,
+			Client:                        clientUUID,
+			TaskId:                        taskID,
+			Enable:                        true,
+			LossEnabled:                   lossCfg.Enabled,
+			WindowSeconds:                 lossCfg.WindowSeconds,
+			LossThreshold:                 lossCfg.LossThreshold,
+			MinimumSamples:                lossCfg.MinimumSamples,
+			CooldownSeconds:               lossCfg.CooldownSeconds,
+			LatencyEnabled:                latencyCfg.Enabled,
+			AdaptiveBaselineEnabled:       latencyCfg.Enabled,
+			LatencyWindowSeconds:          latencyCfg.WindowSeconds,
+			LatencyMinimumSamples:         latencyCfg.MinimumSamples,
+			LatencyCooldownSeconds:        latencyCfg.CooldownSeconds,
+			AdaptiveLowerDeviationPercent: latencyCfg.LowerDeviationPercent,
+			AdaptiveUpperDeviationPercent: latencyCfg.UpperDeviationPercent,
+			BaselineWindowSeconds:         latencyCfg.BaselineWindowSeconds,
+			BaselineMinimumSamples:        latencyCfg.BaselineMinimumSamples,
+			LatencyAlertState:             models.LatencyAlertNormal,
+			AdaptiveBaselineStatus:        models.AdaptiveBaselineWarming,
 		}
 		if err := tx.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "client"}, {Name: "task_id"}},
 			DoNothing: true,
 		}).Select(
-			"client", "task_id", "enable", "window_seconds", "loss_threshold",
-			"minimum_samples", "cooldown_seconds",
+			"client", "task_id", "enable", "loss_enabled", "window_seconds", "loss_threshold",
+			"minimum_samples", "cooldown_seconds", "latency_enabled", "adaptive_baseline_enabled",
+			"latency_window_seconds", "latency_minimum_samples", "latency_cooldown_seconds",
+			"adaptive_lower_deviation_percent", "adaptive_upper_deviation_percent",
+			"baseline_window_seconds", "baseline_minimum_samples", "latency_alert_state",
+			"adaptive_baseline_status",
 		).Create(&candidate).Error; err != nil {
-			return fmt.Errorf("apply ping loss notification default: %w", err)
+			return fmt.Errorf("apply ping health notification default: %w", err)
 		}
 	}
 	return nil

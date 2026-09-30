@@ -1068,14 +1068,58 @@ func TestRemainingValueSkipsLongTermExpiry(t *testing.T) {
 	assert.Nil(t, days)
 }
 
-func TestRemainingDaysUsesNearestDayLikeTheme(t *testing.T) {
+func TestRemainingByClientKeepsNativeCurrencyAndSkipsNonRecurring(t *testing.T) {
+	db := billingTestDB(t)
+	now := beijingTime(2026, time.August, 30, 12, 0)
+	finite := now.Add(30 * 24 * time.Hour)
+	longTerm := now.AddDate(200, 0, 0)
+	saveClient(t, db, models.Client{UUID: "usd-node", Name: "usd-node", Price: 30, BillingCycle: 30, Currency: "USD", ExpiredAt: &finite})
+	saveClient(t, db, models.Client{UUID: "one-time", Name: "one-time", Price: 99, BillingCycle: -1, Currency: "USD", ExpiredAt: &finite})
+	saveClient(t, db, models.Client{UUID: "free", Name: "free", Price: -1, BillingCycle: 30, Currency: "USD", ExpiredAt: &finite})
+	saveClient(t, db, models.Client{UUID: "long-term", Name: "long-term", Price: 30, BillingCycle: 30, Currency: "USD", ExpiredAt: &longTerm})
+	require.NoError(t, EnsureInitialPriceVersions(db, now))
+
+	got, err := RemainingByClient(context.Background(), db, now)
+	require.NoError(t, err)
+	require.Contains(t, got, "usd-node")
+	assert.Equal(t, "USD", got["usd-node"].Currency)
+	require.NotEmpty(t, got["usd-node"].Value)
+	_, hasOneTime := got["one-time"]
+	_, hasFree := got["free"]
+	_, hasLongTerm := got["long-term"]
+	assert.False(t, hasOneTime)
+	assert.False(t, hasFree)
+	assert.False(t, hasLongTerm)
+
+	page, err := GetServers(context.Background(), db, ServerQuery{Currency: "USD", Now: now, Page: 1, PageSize: 10})
+	require.NoError(t, err)
+	var want string
+	for _, row := range page.Items {
+		if row.Client == "usd-node" {
+			require.NotNil(t, row.RemainingValue)
+			want = *row.RemainingValue
+			break
+		}
+	}
+	require.NotEmpty(t, want)
+	assert.Equal(t, want, got["usd-node"].Value)
+}
+
+func TestRemainingDaysUsesCeilSoSubDayStillCounts(t *testing.T) {
 	now := time.Date(2026, time.September, 4, 9, 20, 0, 0, time.UTC)
 	expire := now.Add(251*24*time.Hour + 7*time.Hour)
 	_, days := remainingValue(models.BillingPriceVersion{
 		PriceMicros: 30_000_000, Currency: "CNY", BillingCycleDays: 30, ExpiredAt: &expire,
 	}, "CNY", nil, now)
 	require.NotNil(t, days)
-	assert.Equal(t, 251, *days)
+	assert.Equal(t, 252, *days)
+
+	soon := now.Add(23 * time.Hour)
+	_, soonDays := remainingValue(models.BillingPriceVersion{
+		PriceMicros: 30_000_000, Currency: "CNY", BillingCycleDays: 30, ExpiredAt: &soon,
+	}, "CNY", nil, now)
+	require.NotNil(t, soonDays)
+	assert.Equal(t, 1, *soonDays)
 }
 
 func TestRemainingValueSummaryExcludesAlreadyExpiredServers(t *testing.T) {
@@ -1161,6 +1205,73 @@ func TestGetServersFiltersRegionGroupAndSearch(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, byName.Items, 1)
 	assert.Equal(t, ca.UUID, byName.Items[0].Client)
+}
+
+func TestGetServersUsesManualRegionOverride(t *testing.T) {
+	db := billingTestDB(t)
+	now := beijingTime(2026, time.August, 25, 12, 0)
+	client := saveClient(t, db, models.Client{
+		Name: "VM-01", Region: "🇺🇸", RegionOverride: "🇭🇰",
+		Price: 10, BillingCycle: 30, Currency: "USD",
+	})
+	require.NoError(t, EnsureInitialPriceVersions(db, now))
+
+	page, err := GetServers(context.Background(), db, ServerQuery{Currency: "CNY", Now: now, Page: 1, PageSize: 10})
+	require.NoError(t, err)
+	require.Len(t, page.Items, 1)
+	assert.Equal(t, client.UUID, page.Items[0].Client)
+	assert.Equal(t, "🇭🇰", page.Items[0].Region)
+
+	byOverride, err := GetServers(context.Background(), db, ServerQuery{Currency: "CNY", Regions: []string{"HK"}, Now: now, Page: 1, PageSize: 10})
+	require.NoError(t, err)
+	require.Len(t, byOverride.Items, 1)
+
+	byDetected, err := GetServers(context.Background(), db, ServerQuery{Currency: "CNY", Regions: []string{"US"}, Now: now, Page: 1, PageSize: 10})
+	require.NoError(t, err)
+	assert.Empty(t, byDetected.Items)
+}
+
+func TestGetServersReturnsNamedExpiryTimezone(t *testing.T) {
+	db := billingTestDB(t)
+	now := beijingTime(2026, time.October, 1, 12, 0)
+	expired := time.Date(2026, 10, 8, 4, 0, 0, 0, time.UTC)
+	ny := saveClient(t, db, models.Client{
+		Name: "ny-node", Region: "🇺🇸",
+		Price: 10, BillingCycle: 30, Currency: "CNY",
+		ExpiredAt: &expired, ExpiryTimezone: "America/New_York",
+	})
+	sh := saveClient(t, db, models.Client{
+		Name: "sh-node", Region: "🇨🇳",
+		Price: 10, BillingCycle: 30, Currency: "CNY",
+		ExpiredAt: &expired, ExpiryTimezone: "Asia/Shanghai",
+	})
+	empty := saveClient(t, db, models.Client{
+		Name: "empty-tz", Region: "🇯🇵",
+		Price: 10, BillingCycle: 30, Currency: "CNY",
+		ExpiredAt: &expired,
+	})
+	require.NoError(t, db.Model(&models.Client{}).Where("uuid = ?", empty.UUID).Update("expiry_timezone", "").Error)
+	require.NoError(t, EnsureInitialPriceVersions(db, now))
+
+	page, err := GetServers(context.Background(), db, ServerQuery{Currency: "CNY", Now: now, Page: 1, PageSize: 10})
+	require.NoError(t, err)
+	byUUID := map[string]BillingServerRow{}
+	for _, row := range page.Items {
+		byUUID[row.Client] = row
+	}
+	nyRow, ok := byUUID[ny.UUID]
+	require.True(t, ok)
+	shRow, ok := byUUID[sh.UUID]
+	require.True(t, ok)
+	emptyRow, ok := byUUID[empty.UUID]
+	require.True(t, ok)
+	assert.Equal(t, "America/New_York", nyRow.ExpiryTimezone)
+	assert.Equal(t, "Asia/Shanghai", shRow.ExpiryTimezone)
+	assert.Equal(t, "Asia/Shanghai", emptyRow.ExpiryTimezone)
+	require.NotNil(t, nyRow.RemainingDays)
+	require.NotNil(t, shRow.RemainingDays)
+	assert.Equal(t, *nyRow.RemainingDays, *shRow.RemainingDays)
+	assert.Equal(t, nyRow.RemainingValue, shRow.RemainingValue)
 }
 
 func TestGetEntriesShowsCommittedBaseInsteadOfDailyAccrual(t *testing.T) {

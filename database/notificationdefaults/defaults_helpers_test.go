@@ -14,5 +14,9 @@ func ApplyPingLossDefaultsToTaskClients(db *gorm.DB, taskID uint, clients []stri
 	if err != nil {
 		return fmt.Errorf("load ping loss notification default: %w", err)
 	}
-	return ApplyLoadedPingLossDefaultsToTaskClients(db, cfg, taskID, clients)
+	latency, err := GetLatencyAnomalyNotificationDefaultConfig()
+	if err != nil {
+		return fmt.Errorf("load latency anomaly notification default: %w", err)
+	}
+	return ApplyLoadedPingHealthDefaultsToTaskClients(db, cfg, latency, taskID, clients)
 }

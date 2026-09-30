@@ -79,9 +79,10 @@ jobs:
 
           VERSION_HASH="$REQUESTED_HASH"
           if [ -z "$VERSION_HASH" ]; then
-            VERSION_HASH="$(node -e 'const c=require("crypto"),a="abcdefghijklmnopqrstuvwxyz0123456789";let s;do{s=Array.from(c.randomBytes(7),b=>a[b%a.length]).join("")}while(!/[a-z]/.test(s)||!/[0-9]/.test(s));process.stdout.write(s)')"
+            VERSION_HASH="$(node -e 'const c=require("crypto"),a="abcdefghijklmnoprstuvwxyz0123456789";let s;do{s=Array.from(c.randomBytes(7),b=>a[b%a.length]).join("")}while(!/[a-z]/.test(s)||!/[0-9]/.test(s));process.stdout.write(s)')"
           fi
           [[ "$VERSION_HASH" =~ ^[A-Za-z0-9]{7}$ ]] || { echo "Invalid version identifier: $VERSION_HASH" >&2; exit 1; }
+          [[ "$VERSION_HASH" != *q* ]] || { echo "Version identifier must not contain q: $VERSION_HASH" >&2; exit 1; }
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "version_hash=$VERSION_HASH" >> "$GITHUB_OUTPUT"

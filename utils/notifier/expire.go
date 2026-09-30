@@ -8,7 +8,7 @@ import (
 	"github.com/nuomiiiii/lite/database/models"
 	messageevent "github.com/nuomiiiii/lite/database/models/messageEvent"
 	"github.com/nuomiiiii/lite/pkg/config"
-	"github.com/nuomiiiii/lite/pkg/timeutil"
+	"github.com/nuomiiiii/lite/pkg/expiry"
 	"github.com/nuomiiiii/lite/utils/messageSender"
 	"github.com/nuomiiiii/lite/utils/renewal"
 )
@@ -50,36 +50,39 @@ func CheckExpire() {
 		type clientToExpireInfo struct {
 			Name     string
 			DaysLeft int
+			Until    string
 		}
 
 		var clientLeadToExpire []clientToExpireInfo
 
 		for _, client := range clients_all {
-			if client.ExpiredAt == nil {
+			if !expiry.IsFinite(client.ExpiredAt) {
 				continue
 			}
 			clientExpireTime := client.ExpiredAt.UTC()
 
-			if clientExpireTime.Before(checkTime) {
+			if !clientExpireTime.After(checkTime) {
 				continue
 			}
 
-			notificationThreshold := checkTime.In(time.Local).AddDate(0, 0, notificationLeadDays).UTC()
+			notificationThreshold := checkTime.AddDate(0, 0, notificationLeadDays)
 
-			if clientExpireTime.Before(notificationThreshold) || clientExpireTime.Equal(notificationThreshold) {
-				daysLeft := timeutil.SystemDateDistance(checkTime, clientExpireTime)
-
-				clientLeadToExpire = append(clientLeadToExpire, clientToExpireInfo{
-					Name:     client.Name,
-					DaysLeft: daysLeft,
-				})
+			if clientExpireTime.After(notificationThreshold) {
+				continue
 			}
+
+			daysLeft := expiry.RemainingDaysCeil(clientExpireTime, checkTime)
+			clientLeadToExpire = append(clientLeadToExpire, clientToExpireInfo{
+				Name:     client.Name,
+				DaysLeft: daysLeft,
+				Until:    expiry.FormatLocalDisplay(clientExpireTime, client.ExpiryTimezone),
+			})
 		}
 
 		if len(clientLeadToExpire) > 0 {
 			message := ""
 			for _, clientInfo := range clientLeadToExpire {
-				message += fmt.Sprintf("• %s (%dd)\n", clientInfo.Name, clientInfo.DaysLeft)
+				message += fmt.Sprintf("• %s (%dd) %s\n", clientInfo.Name, clientInfo.DaysLeft, clientInfo.Until)
 			}
 			messageSender.SendEvent(models.EventMessage{
 				Event:   messageevent.Expire,

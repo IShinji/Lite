@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nuomiiiii/lite/database/billing"
 	"github.com/nuomiiiii/lite/database/models"
 	"github.com/nuomiiiii/lite/pkg/trafficreset"
 )
@@ -66,6 +67,8 @@ type ThemeNode struct {
 	TrafficResetAt        string     `json:"traffic_reset_at,omitempty"`
 	EffectiveTrafficLimit int64      `json:"effective_traffic_limit"`
 	EffectiveTrafficType  string     `json:"effective_traffic_type"`
+	RemainingValue          *string `json:"remaining_value,omitempty"`
+	RemainingValueCurrency  string  `json:"remaining_value_currency,omitempty"`
 }
 
 func themeTrafficResetDay(node models.Client, now time.Time) *int {
@@ -176,4 +179,16 @@ func themeNodeMap(nodes []ThemeNode) map[string]ThemeNode {
 		out[node.UUID] = node
 	}
 	return out
+}
+
+func applyThemeRemainingValues(nodes []ThemeNode, remaining map[string]billing.RemainingAmount) {
+	for index := range nodes {
+		amount, ok := remaining[nodes[index].UUID]
+		if !ok || strings.TrimSpace(amount.Value) == "" {
+			continue
+		}
+		value := amount.Value
+		nodes[index].RemainingValue = &value
+		nodes[index].RemainingValueCurrency = amount.Currency
+	}
 }

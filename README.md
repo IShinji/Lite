@@ -9,7 +9,7 @@ Lite 是一款轻量、自托管的服务器监控与运维管理工具。服务
 
 本项目基于 [komari-monitor/komari](https://github.com/komari-monitor/komari) 持续开发，重点改善低配置主控上的数据库占用、历史查询和维护负载，同时提供流量管理、成本中心、备份迁移、接入安全与适配电脑和手机的管理界面。
 
-**当前正式版：Lite [`2.3.6`](https://github.com/nuomiiiii/Lite/releases/tag/2.3.6) · 配套 Agent [`2.3.3.5`](https://github.com/nuomiiiii/Lite-agent/releases/tag/2.3.3.5) · 默认主题 [`1.2.2`](https://github.com/nuomiiiii/Lite-theme/releases/tag/v1.2.2)**
+**当前正式版：Lite [`2.3.6`](https://github.com/nuomiiiii/Lite/releases/tag/2.3.6) · 配套 Agent [`2.3.3.7`](https://github.com/nuomiiiii/Lite-agent/releases/tag/2.3.3.7) · 默认主题 [`1.2.2`](https://github.com/nuomiiiii/Lite-theme/releases/tag/v1.2.2)**
 
 > [!IMPORTANT]
 > 系统 Web UI 与公开大屏主题独立：Lite Web 负责管理后台、远程终端等系统页面，主题只影响公开大屏。默认和保底主题都是 [Lite-Theme](https://github.com/nuomiiiii/Lite-theme)，可独立更新，并在已有其他可用主题时删除；主题管理始终要求至少保留一个可用主题。原经典主题已拆分为独立的 [lite-Classic](https://github.com/nuomiiiii/lite-Classic)，不再随 Lite 内置。从 Nezha / 旧默认主题升级时会迁到 Lite-Theme。

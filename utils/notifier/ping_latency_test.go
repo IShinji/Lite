@@ -90,12 +90,12 @@ func TestEvaluateFixedLatencyRecoveryRequiresFullWindow(t *testing.T) {
 	recent := now.Add(-time.Minute)
 	notified := now.Add(-time.Hour)
 	rule.LatencyLastNotified = &recent
-	partial := coveredLatencyStats(150, 120, 180, 18, windowStart, now)
-	fewNormal := evaluateLatencyAnomaly(rule, partial, metricstore.PingBaselineCandidate{}, windowStart, now, 0)
-	assert.Equal(t, pingLatencyNotificationNone, fewNormal.Action, "values on the closed boundary must not recover")
-	assert.Equal(t, models.LatencyAlertHigh, fewNormal.Notification.LatencyAlertState)
+	stillHigh := coveredLatencyStats(180, 170, 190, 18, windowStart, now)
+	atBoundary := evaluateLatencyAnomaly(rule, stillHigh, metricstore.PingBaselineCandidate{}, windowStart, now, 0)
+	assert.Equal(t, pingLatencyNotificationNone, atBoundary.Action, "an average still on the boundary must not recover")
+	assert.Equal(t, models.LatencyAlertHigh, atBoundary.Notification.LatencyAlertState)
 
-	inside := coveredLatencyStats(150, 121.1, 179.9, 18, windowStart, now)
+	inside := coveredLatencyStats(150, 100, 210, 18, windowStart, now)
 	recovered := evaluateLatencyAnomaly(rule, inside, metricstore.PingBaselineCandidate{}, windowStart, now, 0)
 	assert.Equal(t, pingLatencyNotificationRecovery, recovered.Action)
 	assert.Equal(t, models.LatencyAlertNormal, recovered.Notification.LatencyAlertState)
@@ -109,6 +109,30 @@ func TestEvaluateFixedLatencyRecoveryRequiresFullWindow(t *testing.T) {
 	rule.LatencyLastNotified = &notified
 	persist := evaluateLatencyAnomaly(rule, coveredLatencyStats(200, 190, 210, 18, windowStart, now), metricstore.PingBaselineCandidate{}, windowStart, now, 0)
 	assert.Equal(t, pingLatencyNotificationPersist, persist.Action)
+}
+
+func TestEvaluateAdaptiveClearsWhenAverageReturns(t *testing.T) {
+	now := time.Date(2026, 9, 30, 13, 2, 0, 0, time.UTC)
+	windowStart := now.Add(-5 * time.Minute)
+	rule := adaptiveLatencyRule(0.5)
+	rule.AdaptiveUpperDeviationPercent = 25
+	rule.AdaptiveLowerDeviationPercent = 25
+	rule.LatencyAlertState = models.LatencyAlertHigh
+	rule.LatencyIncidentNotified = true
+	rule.AdaptiveBaselineStatus = models.AdaptiveBaselineFrozen
+	notified := now.Add(-31 * time.Minute)
+	rule.LatencyLastNotified = &notified
+
+	back := evaluateLatencyAnomaly(rule, coveredLatencyStats(0.5, 0.2, 1, 60, windowStart, now), metricstore.PingBaselineCandidate{}, windowStart, now, 5)
+	assert.Equal(t, pingLatencyNotificationRecovery, back.Action)
+	assert.Equal(t, models.LatencyAlertNormal, back.Notification.LatencyAlertState)
+
+	late := windowStart.Add(3 * time.Minute)
+	uncoveredStats := coveredLatencyStats(0.5, 0.2, 1, 60, windowStart, now)
+	uncoveredStats.FirstSuccessfulAt = &late
+	uncovered := evaluateLatencyAnomaly(rule, uncoveredStats, metricstore.PingBaselineCandidate{}, windowStart, now, 5)
+	assert.Equal(t, pingLatencyNotificationNone, uncovered.Action)
+	assert.Equal(t, models.LatencyAlertHigh, uncovered.Notification.LatencyAlertState)
 }
 
 func TestEvaluateAdaptiveBaselineWarmingAndThresholds(t *testing.T) {
@@ -171,7 +195,7 @@ func TestEvaluateAdaptiveEWMAAndHold(t *testing.T) {
 	rule.AdaptiveBaselineStatus = models.AdaptiveBaselineFrozen
 	frozenNow := now.Add(3 * time.Hour)
 	frozenWindow := frozenNow.Add(-5 * time.Minute)
-	stillFrozen := evaluateLatencyAnomaly(rule, coveredLatencyStats(100, 90, 125, 5, frozenWindow, frozenNow), metricstore.PingBaselineCandidate{Successful: 40, MedianMS: 100}, frozenWindow, frozenNow, 0)
+	stillFrozen := evaluateLatencyAnomaly(rule, coveredLatencyStats(130, 120, 140, 5, frozenWindow, frozenNow), metricstore.PingBaselineCandidate{Successful: 40, MedianMS: 100}, frozenWindow, frozenNow, 0)
 	assert.Equal(t, models.LatencyAlertHigh, stillFrozen.Notification.LatencyAlertState)
 	require.True(t, stillFrozen.Notification.HasAdaptiveBaseline())
 	assert.Equal(t, 100.0, *stillFrozen.Notification.AdaptiveBaselineMs)

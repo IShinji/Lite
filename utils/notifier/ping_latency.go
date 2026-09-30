@@ -88,12 +88,12 @@ func latencyWindowCovered(stats metricstore.PingHealthStats, windowStart, now ti
 	return true
 }
 
-func latencyFullyInside(stats metricstore.PingHealthStats, low, high float64) bool {
-	return stats.HasLatency && stats.MinLatencyMS > low && stats.MaxLatencyMS < high
+func latencyAverageInside(stats metricstore.PingHealthStats, low, high float64) bool {
+	return stats.HasLatency && stats.AverageLatencyMS > low && stats.AverageLatencyMS < high
 }
 
 func latencyFullyRecovered(stats metricstore.PingHealthStats, windowStart, now time.Time, notification models.PingLossNotification, pingIntervalSeconds int, low, high float64) bool {
-	return latencyWindowCovered(stats, windowStart, now, notification, pingIntervalSeconds) && latencyFullyInside(stats, low, high)
+	return latencyWindowCovered(stats, windowStart, now, notification, pingIntervalSeconds) && latencyAverageInside(stats, low, high)
 }
 
 func evaluateLatencyAnomaly(
@@ -190,7 +190,7 @@ func evaluateLatencyAnomaly(
 			}
 			applyLatencyRecovery(&next, now)
 			next.LatencyIncidentNotified = false
-		} else if latencyCooldownElapsed(next, now) {
+		} else if stats.AverageLatencyMS >= high && latencyCooldownElapsed(next, now) {
 			action = pingLatencyNotificationPersist
 			if next.LatencyLastNotified == nil {
 				action = pingLatencyNotificationAlertHigh
@@ -214,7 +214,7 @@ func evaluateLatencyAnomaly(
 			}
 			applyLatencyRecovery(&next, now)
 			next.LatencyIncidentNotified = false
-		} else if latencyCooldownElapsed(next, now) {
+		} else if stats.AverageLatencyMS <= low && latencyCooldownElapsed(next, now) {
 			action = pingLatencyNotificationPersist
 			if next.LatencyLastNotified == nil {
 				action = pingLatencyNotificationAlertLow
@@ -398,7 +398,7 @@ func formatPingLatencyMessage(notification models.PingLossNotification, stats me
 		}
 	}
 	if action == pingLatencyNotificationRecovery {
-		lines = append(lines, fmt.Sprintf("最近 %s内全部成功样本已回到 %.1f-%.1fms 范围", formatPingLossWindow(notification.LatencyWindowSeconds), low, high))
+		lines = append(lines, fmt.Sprintf("最近 %s的平均延迟已回到 %.1f-%.1f ms", formatPingLossWindow(notification.LatencyWindowSeconds), low, high))
 	}
 	lines = append(lines,
 		fmt.Sprintf("成功样本：%d", stats.Successful),

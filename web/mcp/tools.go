@@ -88,11 +88,11 @@ func toolDescriptors() []gin.H {
 		tool("file_copy", "Copy a path", objectSchema(gin.H{"agent_uuid": agentUUID, "source": schema("source", "string", true), "destination": schema("destination", "string", true), "overwrite": schema("overwrite", "boolean", false), "idempotency_key": idem}, []string{"agent_uuid", "source", "destination", "idempotency_key"})),
 		tool("file_delete", "Delete a path", objectSchema(gin.H{"agent_uuid": agentUUID, "path": path, "recursive": schema("recursive", "boolean", true), "idempotency_key": idem}, []string{"agent_uuid", "path", "recursive", "idempotency_key"})),
 		tool("file_upload_begin", "Begin a chunked upload", objectSchema(gin.H{"agent_uuid": agentUUID, "path": path, "size": schema("size", "integer", true), "overwrite": schema("overwrite", "boolean", false), "idempotency_key": idem}, []string{"agent_uuid", "path", "size", "idempotency_key"})),
-		tool("file_upload_chunk", "Upload a file chunk", objectSchema(gin.H{"agent_uuid": agentUUID, "upload_id": schema("upload_id", "string", true), "data": schema("data", "string", true), "offset": schema("offset", "integer", true), "chunk_index": schema("chunk_index", "integer", false), "sha256": schema("sha256", "string", false)}, []string{"agent_uuid", "upload_id", "data", "offset"})),
+		tool("file_upload_chunk", "Upload one base64 chunk, at most 1 MiB decoded. Later offsets may be sent before earlier ones.", objectSchema(gin.H{"agent_uuid": agentUUID, "upload_id": schema("upload_id", "string", true), "data": schema("data", "string", true), "offset": schema("offset", "integer", true), "chunk_index": schema("chunk_index", "integer", false), "sha256": schema("sha256", "string", false)}, []string{"agent_uuid", "upload_id", "data", "offset"})),
 		tool("file_upload_finish", "Finish a chunked upload", objectSchema(gin.H{"agent_uuid": agentUUID, "upload_id": schema("upload_id", "string", true)}, []string{"agent_uuid", "upload_id"})),
 		tool("file_upload_cancel", "Cancel a chunked upload", objectSchema(gin.H{"agent_uuid": agentUUID, "upload_id": schema("upload_id", "string", true)}, []string{"agent_uuid", "upload_id"})),
 		tool("file_download_begin", "Begin a chunked download", objectSchema(gin.H{"agent_uuid": agentUUID, "path": path}, []string{"agent_uuid", "path"})),
-		tool("file_download_read", "Read a download chunk", objectSchema(gin.H{"download_id": schema("download_id", "string", true), "offset": schema("offset", "integer", false), "max_bytes": schema("max_bytes", "integer", false)}, []string{"download_id"})),
+		tool("file_download_read", "Read a download chunk of at most 1 MiB", objectSchema(gin.H{"download_id": schema("download_id", "string", true), "offset": schema("offset", "integer", false), "max_bytes": schema("max_bytes", "integer", false)}, []string{"download_id"})),
 		tool("file_download_close", "Close a download", objectSchema(gin.H{"download_id": schema("download_id", "string", true)}, []string{"download_id"})),
 	}
 }
@@ -538,6 +538,11 @@ func fileTool(lease models.MCPLease, fileType string, args map[string]any, now t
 			return nil, errTool("idempotency_key is required")
 		}
 	}
+	if fileType == "file.upload.chunk" {
+		if err := validateMCPUploadChunk(rawStringArg(args, "data")); err != nil {
+			return nil, err
+		}
+	}
 	request := map[string]any{
 		"type":        fileType,
 		"id":          "pending",
@@ -724,6 +729,22 @@ func durationArg(args map[string]any, key string, fallback time.Duration) time.D
 		return fallback
 	}
 	return time.Duration(seconds) * time.Second
+}
+
+const maxMCPUploadChunkBytes = 1 << 20
+
+func validateMCPUploadChunk(data string) error {
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(data))
+	if err != nil {
+		return errTool("invalid upload chunk")
+	}
+	if len(decoded) == 0 {
+		return errTool("upload chunk is empty")
+	}
+	if len(decoded) > maxMCPUploadChunkBytes {
+		return errTool("upload chunk is too large")
+	}
+	return nil
 }
 
 func decodeToolBytes(data, encoding string) ([]byte, error) {

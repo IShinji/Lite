@@ -1,6 +1,9 @@
 package mcp
 
 import (
+	"bytes"
+	"encoding/base64"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,6 +12,19 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
+
+func TestValidateMCPUploadChunkUsesOneMiBCap(t *testing.T) {
+	if err := validateMCPUploadChunk(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("a"), 1<<20))); err != nil {
+		t.Fatal(err)
+	}
+	err := validateMCPUploadChunk(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("a"), 1<<20+1)))
+	if err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("oversized chunk err = %v", err)
+	}
+	if err := validateMCPUploadChunk("not base64"); err == nil {
+		t.Fatal("expected invalid base64 to be rejected")
+	}
+}
 
 func TestCreateOperationReusesMatchingIdempotencyKey(t *testing.T) {
 	db := openMCPTestDB(t)

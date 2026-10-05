@@ -15,9 +15,9 @@ import (
 
 const (
 	pendingSessionTTL         = 45 * time.Second
-	remoteIdleTimeout         = 3 * time.Minute
+	remoteIdleTimeout         = 30 * time.Minute
 	remotePingInterval        = 15 * time.Second
-	remoteMaxDuration         = 2 * time.Hour
+	remoteMaxDuration         = 6 * time.Hour
 	remoteReadLimit           = 2 << 20
 	maxRemoteSessions         = 64
 	maxRemoteSessionsPerLogin = 16
@@ -111,7 +111,7 @@ func (session *remoteSession) isStaleLocked(now time.Time) bool {
 		return true
 	}
 	if session.mcp {
-		return !now.Before(session.ExpiresAt)
+		return session.mcpInactive(now)
 	}
 	if session.StartedAt.IsZero() {
 		return !now.Before(session.ExpiresAt)
@@ -121,6 +121,17 @@ func (session *remoteSession) isStaleLocked(now time.Time) bool {
 		lastActivity = session.StartedAt
 	}
 	return now.Sub(lastActivity) > remoteIdleTimeout || now.Sub(session.StartedAt) > remoteMaxDuration
+}
+
+func (session *remoteSession) mcpInactive(now time.Time) bool {
+	return !session.ExpiresAt.IsZero() && !now.Before(session.ExpiresAt)
+}
+
+func mcpSessionLimit(session *remoteSession, now time.Time) time.Time {
+	if !session.ExpiresAt.IsZero() {
+		return session.ExpiresAt
+	}
+	return now
 }
 
 func (session *remoteSession) pendingAgentTicket() string {

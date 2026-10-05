@@ -11,25 +11,26 @@ import (
 )
 
 const (
-	MinDurationMinutes     = 1
-	HardMaxDurationMinutes = 1440
-	DefaultDurationMinutes = 30
-	DefaultMaxConcurrency  = 4
-	MaxConcurrencyCap      = 16
-	AccessTokenTTL         = 5 * time.Minute
-	AuthCodeTTL            = 180 * time.Second
-	DefaultExecTimeout     = 5 * time.Minute
-	MaxOutputCache         = 1 << 20
-	AdminOutputPreviewMax  = 800
-	DefaultReadBytes       = 64 << 10
-	MaxReadBytes           = 256 << 10
-	PolicyVersion          = 1
-	MaxActiveLeases        = 32
-	MaxActiveLeasesPerUser = 8
+	MinDurationMinutes        = 1
+	DefaultMaxDurationMinutes = 24 * 60
+	HardMaxDurationMinutes    = 72 * 60
+	DefaultDurationMinutes    = 30
+	DefaultMaxConcurrency     = 4
+	MaxConcurrencyCap         = 16
+	AccessTokenTTL            = 5 * time.Minute
+	AuthCodeTTL               = 180 * time.Second
+	DefaultExecTimeout        = 5 * time.Minute
+	MaxOutputCache            = 1 << 20
+	AdminOutputPreviewMax     = 800
+	DefaultReadBytes          = 64 << 10
+	MaxReadBytes              = 256 << 10
+	PolicyVersion             = 1
+	MaxActiveLeases           = 32
+	MaxActiveLeasesPerUser    = 8
 )
 
 var (
-	ErrDurationInvalid = errors.New("authorization duration must be an integer between 1 and 1440 minutes")
+	ErrDurationInvalid = errors.New("authorization duration must be an integer between 1 and 4320 minutes")
 	ErrDurationOverMax = errors.New("authorization duration exceeds the site maximum")
 	ErrSettingsInvalid = errors.New("MCP duration settings are invalid")
 )
@@ -43,13 +44,13 @@ type DurationSettings struct {
 func siteDurationSettings() DurationSettings {
 	defaults := DurationSettings{
 		DefaultMinutes: DefaultDurationMinutes,
-		MaxMinutes:     HardMaxDurationMinutes,
+		MaxMinutes:     DefaultMaxDurationMinutes,
 		MaxConcurrency: DefaultMaxConcurrency,
 	}
 	if v, err := config.GetAs[int](config.MCPDefaultDurationMinKey, DefaultDurationMinutes); err == nil {
 		defaults.DefaultMinutes = v
 	}
-	if v, err := config.GetAs[int](config.MCPMaxDurationMinKey, HardMaxDurationMinutes); err == nil {
+	if v, err := config.GetAs[int](config.MCPMaxDurationMinKey, DefaultMaxDurationMinutes); err == nil {
 		defaults.MaxMinutes = v
 	}
 	if v, err := config.GetAs[int](config.MCPMaxConcurrencyKey, DefaultMaxConcurrency); err == nil {
@@ -59,7 +60,7 @@ func siteDurationSettings() DurationSettings {
 	if err != nil {
 		return DurationSettings{
 			DefaultMinutes: DefaultDurationMinutes,
-			MaxMinutes:     HardMaxDurationMinutes,
+			MaxMinutes:     DefaultMaxDurationMinutes,
 			MaxConcurrency: DefaultMaxConcurrency,
 		}
 	}

@@ -192,6 +192,7 @@ func sendPingLatencyNotification(notification models.PingLossNotification, stats
 		emoji = "✅"
 	}
 	return sendPingHealthEvent(models.EventMessage{
+		Kind:    messageSender.KindPingLatency,
 		Event:   pingLatencyEventTitle(action),
 		Clients: []models.Client{client},
 		Time:    now,
@@ -210,6 +211,7 @@ func sendPingLossNotification(notification models.PingLossNotification, stats pi
 		emoji = "✅"
 	}
 	return sendPingHealthEvent(models.EventMessage{
+		Kind:    messageSender.KindPingLoss,
 		Event:   pingLossEventTitle(action),
 		Clients: []models.Client{client},
 		Time:    now,

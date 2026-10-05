@@ -490,8 +490,14 @@ func uniqueStrings(values []string, exclude ...[]string) []string {
 	return out
 }
 
-func adminTestSendMessage(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
-	err := messageSender.SendTestEvent(models.EventMessage{
+func adminTestSendMessage(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	var params struct {
+		Provider string `json:"provider"`
+	}
+	if err := req.BindParams(&params); err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request: "+err.Error(), nil)
+	}
+	err := messageSender.SendTestEventTo(params.Provider, models.EventMessage{
 		Event:   "Test",
 		Time:    time.Now().UTC(),
 		Message: "This is a test message from Lite.",

@@ -74,8 +74,6 @@ func getSettings(c *gin.Context) {
 		"endpoint":                     instanceResource(c),
 		"hard_max_duration_minutes":    HardMaxDurationMinutes,
 		"min_duration_minutes":         MinDurationMinutes,
-		"long_term_enabled":            longTermAuthorizationEnabled(),
-		"long_term_expires_at":         longTermExpiresAt().Format(time.RFC3339),
 	})
 }
 
@@ -372,7 +370,14 @@ func approveAuthorization(c *gin.Context) {
 		"owner_user_uuid": principal.UserUUID,
 	}).Error
 	redirect, _ := urlWithCode(req.RedirectURI, code, req.State)
-	auditlog.Event(c.ClientIP(), principal.UserUUID, "warn", "audit.mcp_approve", map[string]string{"id": lease.ID})
+	approveKey := "audit.mcp_approve"
+	if lease.LongTerm {
+		approveKey = "audit.mcp_approve_long"
+	}
+	auditlog.Event(c.ClientIP(), principal.UserUUID, "warn", approveKey, map[string]string{
+		"id":         lease.ID,
+		"expires_at": lease.ExpiresAt.UTC().Format(time.RFC3339),
+	})
 	api.RespondSuccess(c, gin.H{
 		"lease_id":     lease.ID,
 		"expires_at":   lease.ExpiresAt.UTC(),

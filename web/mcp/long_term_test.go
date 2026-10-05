@@ -37,22 +37,20 @@ func longTermTestDB(t *testing.T) *gorm.DB {
 		t.Fatal(err)
 	}
 	longTermTestCreate(t, db, &models.User{UUID: "owner", Username: "test-owner", Passwd: "fixture-not-a-real-password"})
-	oldDatabase, oldOwner, oldEnabled := database, longTermOwnerExists, isMCPEnabled
+	oldDatabase, oldOwner, oldEnabled := database, longTermOwnerLookup, isMCPEnabled
 	database = func() *gorm.DB { return db }
-	longTermOwnerExists = func(uuid string) bool { return uuid == "owner" }
+	longTermOwnerLookup = func(uuid string) (bool, error) { return uuid == "owner", nil }
 	isMCPEnabled = func() bool { return true }
 	refreshMu.Lock()
 	oldRefresh := refreshIn
 	refreshIn = map[string]*refreshWait{}
 	refreshMu.Unlock()
 	t.Cleanup(func() {
-		database, longTermOwnerExists, isMCPEnabled = oldDatabase, oldOwner, oldEnabled
+		database, longTermOwnerLookup, isMCPEnabled = oldDatabase, oldOwner, oldEnabled
 		refreshMu.Lock()
 		refreshIn = oldRefresh
 		refreshMu.Unlock()
 	})
-	t.Setenv(longTermAuthEnv, "false")
-	t.Setenv(longTermMigrationEnv, "")
 	return db
 }
 
@@ -85,23 +83,16 @@ func TestLongTermAuthorizationPolicyOptIn(t *testing.T) {
 	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	yes, no := true, false
 	cases := []struct {
-		name, env               string
+		name                    string
 		requested               *bool
 		wantLongTerm, wantError bool
 	}{
-		{"unset-default-temporary", "", nil, false, false},
-		{"false-default-temporary", "false", nil, false, false},
-		{"invalid-env-default-temporary", "not-a-bool", nil, false, false},
-		{"enabled-omitted-remains-temporary", "true", nil, false, false},
-		{"enabled-explicit-long-term", " true ", &yes, true, false},
-		{"enabled-explicit-temporary", "true", &no, false, false},
-		{"disabled-explicit-temporary", "false", &no, false, false},
-		{"disabled-rejects-long-term", "false", &yes, false, true},
-		{"unset-rejects-long-term", "", &yes, false, true},
+		{"omitted-remains-temporary", nil, false, false},
+		{"explicit-temporary", &no, false, false},
+		{"explicit-long-term", &yes, true, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(longTermAuthEnv, tc.env)
 			longTerm, expires, err := authorizationPolicy(tc.requested, now, 45)
 			if (err != nil) != tc.wantError {
 				t.Fatalf("error = %v, wantError = %v", err, tc.wantError)
@@ -117,64 +108,6 @@ func TestLongTermAuthorizationPolicyOptIn(t *testing.T) {
 				t.Fatalf("policy = (%v, %v), want (%v, %v)", longTerm, expires, tc.wantLongTerm, wantExpiry)
 			}
 		})
-	}
-}
-
-func TestLongTermMigrationOnlyNamedLiveLeasesPreservesGrant(t *testing.T) {
-	db := longTermTestDB(t)
-	t.Setenv(longTermAuthEnv, "true")
-	now := time.Now().UTC()
-	live := longTermTestLease("named-live", false, now)
-	live.ExpiresAt = now.Add(2 * time.Hour)
-	unnamed := longTermTestLease("unnamed-live", false, now)
-	revoked := longTermTestLease("named-revoked", false, now)
-	revoked.Status, revoked.RevokedAt, revoked.RevocationReason = statusRevoked, &now, reasonRevoked
-	expired := longTermTestLease("named-expired", false, now)
-	expired.ExpiresAt = now.Add(-time.Minute)
-	for _, row := range []*models.MCPLease{&live, &unnamed, &revoked, &expired} {
-		longTermTestCreate(t, db, row)
-	}
-	t.Setenv(longTermMigrationEnv, " named-live, named-revoked,named-expired,named-live ")
-	for i := 0; i < 2; i++ {
-		if err := promoteConfiguredLongTermLeases(); err != nil {
-			t.Fatal(err)
-		}
-	}
-	got := longTermTestStoredLease(t, db, live.ID)
-	got.LongTerm = false
-	if !reflect.DeepEqual(got, live) {
-		t.Fatalf("migration changed grant fields beyond LongTerm:\ngot  %+v\nwant %+v", got, live)
-	}
-	if !longTermTestStoredLease(t, db, live.ID).LongTerm {
-		t.Fatal("explicit live lease was not promoted")
-	}
-	for _, original := range []models.MCPLease{unnamed, revoked, expired} {
-		if got := longTermTestStoredLease(t, db, original.ID); !reflect.DeepEqual(got, original) {
-			t.Fatalf("migration altered unselected/inactive lease %s: %+v", original.ID, got)
-		}
-	}
-	// A migration list left in the environment cannot undo a later revocation.
-	if err := revokeFamily(live.TokenFamilyID, reasonRevoked); err != nil {
-		t.Fatal(err)
-	}
-	if err := promoteConfiguredLongTermLeases(); err != nil {
-		t.Fatal(err)
-	}
-	if got := longTermTestStoredLease(t, db, live.ID); got.Status != statusRevoked || got.RevokedAt == nil {
-		t.Fatalf("migration resurrected revoked promoted lease: %+v", got)
-	}
-}
-
-func TestLongTermMigrationDisabledDoesNotPromote(t *testing.T) {
-	db := longTermTestDB(t)
-	lease := longTermTestLease("named", false, time.Now().UTC())
-	longTermTestCreate(t, db, &lease)
-	t.Setenv(longTermMigrationEnv, lease.ID)
-	if err := promoteConfiguredLongTermLeases(); err != nil {
-		t.Fatal(err)
-	}
-	if longTermTestStoredLease(t, db, lease.ID).LongTerm {
-		t.Fatal("disabled feature promoted a lease")
 	}
 }
 
@@ -265,7 +198,7 @@ func TestLongTermLoadLiveLeaseIgnoresBrowserSessionButRequiresOwner(t *testing.T
 			if got, err := loadLiveLease(lease.ID, now); err != nil || got.ID != lease.ID {
 				t.Fatalf("long-term lease required browser session: %+v %v", got, err)
 			}
-			longTermOwnerExists = func(string) bool { return false }
+			longTermOwnerLookup = func(string) (bool, error) { return false, nil }
 			if _, err := loadLiveLease(lease.ID, now); !errors.Is(err, ErrLeaseInactive) {
 				t.Fatalf("deleted owner error = %v, want ErrLeaseInactive", err)
 			}
@@ -395,6 +328,10 @@ func TestLongTermRefreshRetrySamePairAndClientBindingBeforeCache(t *testing.T) {
 	status, mismatch := longTermTestRefreshHTTP(t, original.Refresh, "other-client")
 	if status != http.StatusBadRequest || mismatch["error"] != "invalid_client" || mismatch["access_token"] != nil {
 		t.Fatalf("cached response leaked to mismatching client: %d %+v", status, mismatch)
+	}
+	status, missingClient := longTermTestRefreshHTTP(t, original.Refresh, "")
+	if status != http.StatusBadRequest || missingClient["error"] != "invalid_client" || missingClient["access_token"] != nil {
+		t.Fatalf("cached response leaked to empty client id: %d %+v", status, missingClient)
 	}
 	status, retry := longTermTestRefreshHTTP(t, original.Refresh, "client")
 	if status != http.StatusOK || !reflect.DeepEqual(first, retry) {

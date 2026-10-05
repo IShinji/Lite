@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -9,36 +10,17 @@ import (
 	"gorm.io/gorm"
 )
 
-func TestLongTermMigrationUsesSingleTransactionConnection(t *testing.T) {
-	db := longTermTestDB(t) // MaxOpenConns(1), real users table.
-	t.Setenv(longTermAuthEnv, "true")
-	lease := longTermTestLease("single-connection", false, time.Now().UTC())
-	longTermTestCreate(t, db, &lease)
-	t.Setenv(longTermMigrationEnv, lease.ID)
-	longTermOwnerExists = func(string) bool {
-		t.Fatal("migration must validate the owner through its transaction, not another connection")
-		return false
-	}
-	if err := promoteConfiguredLongTermLeases(); err != nil {
-		t.Fatal(err)
-	}
-	if !longTermTestStoredLease(t, db, lease.ID).LongTerm {
-		t.Fatal("lease not promoted")
-	}
-}
-
-func TestLongTermMigrationMissingOwnerRollsBack(t *testing.T) {
+func TestLongTermOwnerLookupErrorDoesNotRevoke(t *testing.T) {
 	db := longTermTestDB(t)
-	t.Setenv(longTermAuthEnv, "true")
-	lease := longTermTestLease("missing-owner", false, time.Now().UTC())
-	lease.OwnerUserUUID = "deleted-owner"
+	now := time.Now().UTC()
+	lease := longTermTestLease("long", true, now)
 	longTermTestCreate(t, db, &lease)
-	t.Setenv(longTermMigrationEnv, lease.ID)
-	if err := promoteConfiguredLongTermLeases(); err == nil {
-		t.Fatal("missing owner accepted")
+	longTermOwnerLookup = func(string) (bool, error) { return false, errors.New("database unavailable") }
+	if _, err := loadLiveLease(lease.ID, now); err == nil || errors.Is(err, ErrLeaseInactive) {
+		t.Fatalf("lookup error = %v, want a database error", err)
 	}
-	if longTermTestStoredLease(t, db, lease.ID).LongTerm {
-		t.Fatal("invalid grant was promoted")
+	if got := longTermTestStoredLease(t, db, lease.ID); got.Status != statusActive || got.RevokedAt != nil {
+		t.Fatalf("lookup error revoked lease: %+v", got)
 	}
 }
 

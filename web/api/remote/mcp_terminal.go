@@ -60,7 +60,10 @@ func EnsureMCPTerminal(sessionID, leaseID string) error {
 	if session == nil || !session.mcp || session.leaseID != leaseID {
 		return errors.New("terminal not found")
 	}
-	if time.Now().After(session.ExpiresAt) {
+	session.mu.Lock()
+	inactive := session.mcpInactive(time.Now())
+	session.mu.Unlock()
+	if inactive {
 		return errors.New("terminal has expired")
 	}
 	return nil
@@ -174,7 +177,10 @@ func forwardMCPSession(session *remoteSession) {
 		return
 	}
 	auditlog.Event(session.RequesterIP, session.UserUUID, "terminal", "audit.mcp_terminal_open", map[string]string{"name": clients.DisplayName(session.UUID)})
-	_ = agent.SetReadDeadline(session.ExpiresAt)
+	session.mu.Lock()
+	limit := mcpSessionLimit(session, time.Now())
+	session.mu.Unlock()
+	_ = agent.SetReadDeadline(limit)
 	errCh := make(chan error, 1)
 	go func() {
 		for {
@@ -189,7 +195,7 @@ func forwardMCPSession(session *remoteSession) {
 			}
 		}
 	}()
-	timer := time.NewTimer(time.Until(session.ExpiresAt))
+	timer := time.NewTimer(time.Until(limit))
 	pingTicker := time.NewTicker(remotePingInterval)
 	defer pingTicker.Stop()
 	waiting := true
@@ -200,7 +206,10 @@ func forwardMCPSession(session *remoteSession) {
 		case <-timer.C:
 			waiting = false
 		case now := <-pingTicker.C:
-			if !mcpTerminalAuthorizationValid(session) || now.After(session.ExpiresAt) {
+			session.mu.Lock()
+			inactive := session.mcpInactive(now)
+			session.mu.Unlock()
+			if inactive || !mcpTerminalAuthorizationValid(session) {
 				waiting = false
 				continue
 			}

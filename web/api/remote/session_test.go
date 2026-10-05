@@ -131,18 +131,42 @@ func TestRemoteHeartbeatIsConsumedByServer(t *testing.T) {
 	}
 }
 
-func TestRemoteIdleTimeoutIsThreeMinutes(t *testing.T) {
+func TestMCPSessionFollowsAuthorizationExpiry(t *testing.T) {
+	now := time.Now()
+	fresh := &remoteSession{
+		mcp:          true,
+		CreatedAt:    now.Add(-3 * time.Hour),
+		StartedAt:    now.Add(-3 * time.Hour),
+		LastActivity: now,
+		ExpiresAt:    now.Add(time.Hour),
+	}
+	if fresh.mcpInactive(now) {
+		t.Fatal("MCP session ended before the authorization expired")
+	}
+	if !fresh.mcpInactive(fresh.ExpiresAt) {
+		t.Fatal("MCP session stayed open after the authorization expired")
+	}
+	if limit := mcpSessionLimit(fresh, now); !limit.Equal(fresh.ExpiresAt) {
+		t.Fatalf("session limit = %s, want authorization expiry", limit)
+	}
+	fresh.LastActivity = now.Add(-remoteIdleTimeout - time.Second)
+	if fresh.mcpInactive(now) {
+		t.Fatal("idle MCP session ended before the authorization expired")
+	}
+}
+
+func TestRemoteSessionLimits(t *testing.T) {
 	if pendingSessionTTL != 45*time.Second {
 		t.Fatalf("pending session TTL is %s, want 45s", pendingSessionTTL)
 	}
-	if remoteIdleTimeout != 3*time.Minute {
-		t.Fatalf("remote idle timeout is %s, want 3m", remoteIdleTimeout)
+	if remoteIdleTimeout != 30*time.Minute {
+		t.Fatalf("remote idle timeout is %s, want 30m", remoteIdleTimeout)
 	}
 	if remotePingInterval != 15*time.Second {
 		t.Fatalf("remote ping interval is %s, want 15s", remotePingInterval)
 	}
-	if remoteMaxDuration != 2*time.Hour {
-		t.Fatalf("remote max duration is %s, want 2h", remoteMaxDuration)
+	if remoteMaxDuration != 6*time.Hour {
+		t.Fatalf("remote max duration is %s, want 6h", remoteMaxDuration)
 	}
 
 	now := time.Now()
@@ -154,6 +178,16 @@ func TestRemoteIdleTimeoutIsThreeMinutes(t *testing.T) {
 	if session.stale(now) {
 		t.Fatal("connected session with a recent pong was treated as idle")
 	}
+	session.LastActivity = now
+	session.StartedAt = now.Add(-2*time.Hour - time.Second)
+	if session.stale(now) {
+		t.Fatal("browser session ended at the old 2 hour cap")
+	}
+	session.StartedAt = now.Add(-remoteMaxDuration - time.Second)
+	if !session.stale(now) {
+		t.Fatal("browser session stayed open past the maximum duration")
+	}
+	session.StartedAt = now.Add(-time.Minute)
 	session.LastActivity = now.Add(-remoteIdleTimeout - time.Second)
 	if !session.stale(now) {
 		t.Fatal("connected session past idle timeout was kept")

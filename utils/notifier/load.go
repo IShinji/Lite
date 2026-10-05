@@ -397,7 +397,7 @@ func sendLoadClientNotificationsWith(db *gorm.DB, clientUUIDs []string, task mod
 			emoji, message = "✅", task.Name+" 已恢复"
 		}
 		if err := send(models.EventMessage{
-			Event: messageevent.Alert, Clients: []models.Client{client}, Time: now.UTC(), Emoji: emoji, Message: message,
+			Kind: messageSender.KindLoad, Event: messageevent.Alert, Clients: []models.Client{client}, Time: now.UTC(), Emoji: emoji, Message: message,
 		}); err != nil {
 			sendErrors = append(sendErrors, fmt.Errorf("send client %s: %w", clientUUID, err))
 			continue

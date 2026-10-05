@@ -1,9 +1,7 @@
 package mcp
 
 import (
-	"fmt"
-	"os"
-	"strconv"
+	"errors"
 	"strings"
 	"time"
 
@@ -12,20 +10,24 @@ import (
 	"gorm.io/gorm"
 )
 
-// Long-term authorization is opt-in at the instance and per-lease levels.
-// Access tokens remain short lived; account-security and explicit revocation
-// continue to invalidate these leases. This is not an administrator API key.
-const longTermAuthEnv = "LITE_MCP_LONG_TERM_AUTH"
-const longTermMigrationEnv = "LITE_MCP_LONG_TERM_LEASE_IDS"
+// Long-term authorization is chosen on the approval page. Access tokens remain
+// short lived; account-security and explicit revocation continue to invalidate
+// these leases. This is not an administrator API key.
 
-var longTermOwnerExists = func(uuid string) bool {
-	_, err := accounts.GetUserByUUID(uuid)
-	return uuid != "" && err == nil
-}
-
-func longTermAuthorizationEnabled() bool {
-	enabled, err := strconv.ParseBool(strings.TrimSpace(os.Getenv(longTermAuthEnv)))
-	return err == nil && enabled
+// exists is false only when the account is confirmed missing. Other errors
+// must not revoke a live grant.
+var longTermOwnerLookup = func(uuid string) (exists bool, err error) {
+	if strings.TrimSpace(uuid) == "" {
+		return false, nil
+	}
+	_, err = accounts.GetUserByUUID(uuid)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, nil
+	}
+	return false, err
 }
 
 func longTermExpiresAt() time.Time {
@@ -37,9 +39,6 @@ func authorizationPolicy(requested *bool, now time.Time, minutes int) (bool, tim
 	if requested != nil {
 		longTerm = *requested
 	}
-	if longTerm && !longTermAuthorizationEnabled() {
-		return false, time.Time{}, fmt.Errorf("long-term MCP authorization is not enabled")
-	}
 	if longTerm {
 		expires := longTermExpiresAt()
 		if !expires.After(now) {
@@ -50,41 +49,11 @@ func authorizationPolicy(requested *bool, now time.Time, minutes int) (bool, tim
 	return false, leaseExpiresAt(now, minutes), nil
 }
 
-// Migrate only explicitly named, already-live leases. Never restore an expired
-// or revoked grant, alter its node scope, or extend its existing expiration.
-func promoteConfiguredLongTermLeases() error {
-	if !longTermAuthorizationEnabled() {
+func normalizeLongTermFlags(db *gorm.DB) error {
+	if db == nil || !db.Migrator().HasTable(&models.MCPLease{}) || !db.Migrator().HasColumn(&models.MCPLease{}, "long_term") {
 		return nil
 	}
-	ids := compactStrings(strings.Split(os.Getenv(longTermMigrationEnv), ","))
-	if len(ids) == 0 {
-		return nil
-	}
-	now := time.Now().UTC()
-	return database().Transaction(func(tx *gorm.DB) error {
-		for _, id := range ids {
-			var lease models.MCPLease
-			if err := tx.Where("id = ?", id).First(&lease).Error; err != nil {
-				return fmt.Errorf("long-term migration lease %s: %w", id, err)
-			}
-			// A once-off migration list may remain configured after revocation.
-			// Skip inactive rows rather than resurrecting them on the next restart.
-			if lease.LongTerm || !leaseLive(lease, now) {
-				continue
-			}
-			var ownerCount int64
-			if err := tx.Model(&models.User{}).Where("uuid = ?", lease.OwnerUserUUID).Count(&ownerCount).Error; err != nil {
-				return err
-			}
-			if ownerCount != 1 {
-				return fmt.Errorf("long-term migration lease %s has no valid owner", id)
-			}
-			if err := tx.Model(&lease).Update("long_term", true).Error; err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	return db.Exec("UPDATE mcp_leases SET long_term = ? WHERE long_term IS NULL", false).Error
 }
 
 func visibleAdminLeases(db *gorm.DB, now time.Time) ([]models.MCPLease, error) {

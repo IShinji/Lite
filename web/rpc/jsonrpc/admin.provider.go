@@ -56,11 +56,16 @@ func adminSetMessageSender(_ context.Context, req *rpc.JsonRpcRequest) (any, *rp
 	if err := database.SaveMessageSenderConfig(&senderConfig); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to save message sender provider configuration: "+err.Error(), nil)
 	}
-	method, _ := config.GetAs[string](config.NotificationMethodKey, "none")
-	if method == senderConfig.Name { // 正在使用，重载
-		if err := messageSender.LoadProvider(senderConfig.Name, senderConfig.Addition); err != nil {
-			return nil, rpc.MakeError(rpc.InternalError, "Failed to load message sender provider: "+err.Error(), nil)
-		}
+	selected, err := messageSender.ChannelSelected(senderConfig.Name)
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to read notification routes: "+err.Error(), nil)
+	}
+	if !selected {
+		messageSender.UnloadProvider(senderConfig.Name)
+		return map[string]any{"message": "Message sender provider set successfully"}, nil
+	}
+	if err := messageSender.LoadProvider(senderConfig.Name, senderConfig.Addition); err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to load message sender provider: "+err.Error(), nil)
 	}
 	return map[string]any{"message": "Message sender provider set successfully"}, nil
 }

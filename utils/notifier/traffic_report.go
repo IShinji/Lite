@@ -254,6 +254,7 @@ func sendTrafficReport(daily, weekly, monthly, currentDaily bool) (TrafficReport
 	}
 
 	if err := messageSender.SendEvent(models.EventMessage{
+		Kind:    trafficReportKind(eventType),
 		Event:   eventType,
 		Clients: eventClients,
 		Time:    now,
@@ -314,6 +315,17 @@ func trafficBillingRule(client models.Client) string {
 
 func billedTrafficUsage(client models.Client, usage trafficUsage) int64 {
 	return computeUsedByType(trafficBillingRule(client), usage.Up, usage.Down)
+}
+
+func trafficReportKind(eventType string) string {
+	switch eventType {
+	case messageevent.WReport:
+		return messageSender.KindTrafficReportWeekly
+	case messageevent.MReport:
+		return messageSender.KindTrafficReportMonthly
+	default:
+		return messageSender.KindTrafficReportDaily
+	}
 }
 
 func formatTrafficReportLine(client models.Client, suffix string, usage trafficUsage, includeTraffic, includeBilling bool) string {

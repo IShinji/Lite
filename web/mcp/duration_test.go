@@ -6,6 +6,15 @@ import (
 	"time"
 )
 
+func TestDefaultMaxDurationStays24Hours(t *testing.T) {
+	if DefaultMaxDurationMinutes != 24*60 {
+		t.Fatalf("default maximum = %d minutes, want 24 hours", DefaultMaxDurationMinutes)
+	}
+	if HardMaxDurationMinutes != 72*60 {
+		t.Fatalf("hard maximum = %d minutes, want 72 hours", HardMaxDurationMinutes)
+	}
+}
+
 func TestParseDurationMinutes(t *testing.T) {
 	cases := []struct {
 		raw     any
@@ -16,9 +25,10 @@ func TestParseDurationMinutes(t *testing.T) {
 		{30, 30, false},
 		{90, 90, false},
 		{1440, 1440, false},
+		{4320, 4320, false},
 		{0, 0, true},
 		{-1, 0, true},
-		{1441, 0, true},
+		{4321, 0, true},
 		{1.5, 0, true},
 		{"90", 90, false},
 		{"", 0, true},
@@ -53,9 +63,12 @@ func TestNormalizeSettingsRejectsDefaultAboveMax(t *testing.T) {
 	if _, err := NormalizeSettings(120, 60, 4); err == nil {
 		t.Fatal("expected default > max to fail")
 	}
-	got, err := NormalizeSettings(30, 1440, 4)
-	if err != nil || got.DefaultMinutes != 30 || got.MaxMinutes != 1440 {
+	got, err := NormalizeSettings(30, HardMaxDurationMinutes, 4)
+	if err != nil || got.DefaultMinutes != 30 || got.MaxMinutes != HardMaxDurationMinutes {
 		t.Fatalf("got %#v %v", got, err)
+	}
+	if _, err := NormalizeSettings(30, HardMaxDurationMinutes+1, 4); err == nil {
+		t.Fatal("expected max above 72 hours to fail")
 	}
 }
 

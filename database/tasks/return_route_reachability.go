@@ -232,6 +232,7 @@ func defaultSendMainlandReachabilityEvent(title, body string, event models.Retur
 		client.UUID = event.Client
 	}
 	return messageSender.SendEvent(models.EventMessage{
+		Kind:    messageSender.KindMainlandReachability,
 		Event:   messageevent.ReturnRoute,
 		Clients: []models.Client{client},
 		Time:    event.OccurredAt,

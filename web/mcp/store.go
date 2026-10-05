@@ -72,8 +72,7 @@ func init() {
 }
 
 func InvalidateActiveLeases() error {
-	promotionErr := promoteConfiguredLongTermLeases()
-	return errors.Join(promotionErr, revokeActiveLeases("", "", reasonRestart))
+	return errors.Join(normalizeLongTermFlags(database()), revokeActiveLeases("", "", reasonRestart))
 }
 
 func RevokeUser(userUUID string) {
@@ -92,7 +91,7 @@ func revokeActiveLeases(userUUID, loginHash, reason string) error {
 	now := time.Now().UTC()
 	query := db.Model(&models.MCPLease{}).Where("status = ? AND revoked_at IS NULL", statusActive)
 	if reason == reasonRestart || reason == reasonLoginRevoked {
-		query = query.Where("long_term = ?", false)
+		query = query.Where("COALESCE(long_term, ?) = ?", false, false)
 	}
 	if userUUID != "" {
 		query = query.Where("owner_user_uuid = ?", userUUID)
@@ -167,7 +166,11 @@ func loadLiveLease(id string, now time.Time) (models.MCPLease, error) {
 		return models.MCPLease{}, ErrLeaseInactive
 	}
 	if lease.LongTerm {
-		if !longTermOwnerExists(lease.OwnerUserUUID) {
+		exists, err := longTermOwnerLookup(lease.OwnerUserUUID)
+		if err != nil {
+			return models.MCPLease{}, err
+		}
+		if !exists {
 			_ = revokeActiveLeases(lease.OwnerUserUUID, "", reasonUserSecurity)
 			return models.MCPLease{}, ErrLeaseInactive
 		}

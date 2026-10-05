@@ -60,6 +60,7 @@ func CheckAndAutoRenewal(client models.Client) {
 	})
 
 	messageSender.SendEvent(models.EventMessage{
+		Kind:    messageSender.KindRenew,
 		Event:   messageevent.Renew,
 		Clients: []models.Client{client},
 		Time:    time.Now().UTC(),

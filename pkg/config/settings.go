@@ -123,6 +123,10 @@ const (
 
 	NotificationEnabledKey               = "notification_enabled"
 	NotificationMethodKey                = "notification_method"
+	NotificationRoutesKey                = "notification_routes"
+	NotificationRoutesMigratedKey        = "notification_routes_migrated"
+	NotificationDigestEnabledKey         = "notification_digest_enabled"
+	NotificationDigestSecondsKey         = "notification_digest_seconds"
 	NotificationTemplateKey              = "notification_template"
 	OfflineNotificationDefaultKey        = "offline_notification_default"
 	PingLossNotificationDefaultKey       = "ping_loss_notification_default"

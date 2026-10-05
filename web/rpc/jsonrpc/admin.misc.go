@@ -18,6 +18,7 @@ import (
 	"github.com/nuomiiiii/lite/pkg/rpc"
 	v2 "github.com/nuomiiiii/lite/protocol/v2"
 	logger "github.com/nuomiiiii/lite/utils/log"
+	"github.com/nuomiiiii/lite/utils/messageSender"
 	agent "github.com/nuomiiiii/lite/web/agent"
 	"github.com/nuomiiiii/lite/web/mcp"
 	"github.com/nuomiiiii/lite/web/passkey"
@@ -115,6 +116,9 @@ func adminDeleteAllSessions(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *r
 }
 
 func adminGetSettings(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	if err := messageSender.EnsureRoutes(); err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to prepare notification routes: "+err.Error(), nil)
+	}
 	cst, err := config.GetAll()
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to get settings: "+err.Error(), nil)
@@ -192,6 +196,21 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 			return nil, rpc.MakeError(rpc.InvalidParams, "Traffic reminder step must be an integer between 1 and 100", nil)
 		}
 		cfg[config.TrafficReminderStepKey] = step
+	}
+	if rawRoutes, ok := cfg[config.NotificationRoutesKey]; ok {
+		routes, err := messageSender.NormalizeRoutes(rawRoutes)
+		if err != nil {
+			return nil, rpc.MakeError(rpc.InvalidParams, "Invalid notification routes: "+err.Error(), nil)
+		}
+		cfg[config.NotificationRoutesKey] = routes
+		cfg[config.NotificationRoutesMigratedKey] = true
+	}
+	if rawDigest, ok := cfg[config.NotificationDigestSecondsKey]; ok {
+		seconds, err := messageSender.NormalizeDigestSeconds(rawDigest)
+		if err != nil {
+			return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
+		}
+		cfg[config.NotificationDigestSecondsKey] = seconds
 	}
 	if rawTTL, ok := cfg[config.SessionTTLSecondsKey]; ok {
 		ttl, ok := normalizeSessionTTLSeconds(rawTTL)

@@ -37,6 +37,7 @@ const (
 	dashboardModuleBillingTrend      = "billing_trend"
 	dashboardModuleReturnRoute       = "return_route"
 	dashboardModuleAlerts            = "alerts"
+	dashboardModuleRenewalCalendar   = "renewal_calendar"
 	dashboardModuleStorageDetail     = "storage_detail"
 )
 
@@ -56,6 +57,7 @@ var dashboardModuleOrder = []string{
 	dashboardModuleBillingTrend,
 	dashboardModuleReturnRoute,
 	dashboardModuleAlerts,
+	dashboardModuleRenewalCalendar,
 	dashboardModuleStorageDetail,
 }
 
@@ -78,6 +80,7 @@ var dashboardPresetDefinitions = map[string]dashboardPresetDefinition{
 			dashboardModuleBillingTrend,
 			dashboardModuleReturnRoute,
 			dashboardModuleAlerts,
+			dashboardModuleRenewalCalendar,
 			dashboardModuleStorageDetail,
 		},
 		RefreshSeconds: 30, ChartRefreshSeconds: 30, RankingLimit: 5,
@@ -337,7 +340,11 @@ func normalizeDashboardSettings(input dashboardSettings, strict bool) (dashboard
 				if id == dashboardModuleCostCenter || id == dashboardModuleTraffic30dSummary {
 					continue
 				}
-				result.Modules = append(result.Modules, dashboardModuleSetting{ID: id, Span: dashboardDefaultModuleSpan(id)})
+				result.Modules = append(result.Modules, dashboardModuleSetting{
+					ID:      id,
+					Enabled: id == dashboardModuleRenewalCalendar,
+					Span:    dashboardDefaultModuleSpan(id),
+				})
 			}
 		}
 		if !hadTraffic30d {
@@ -419,6 +426,8 @@ func dashboardDefaultModuleSpan(id string) int {
 		return 3
 	case dashboardModuleResourceRanking, dashboardModuleLatencyTrend:
 		return 12
+	case dashboardModuleRenewalCalendar:
+		return 4
 	default:
 		return 6
 	}

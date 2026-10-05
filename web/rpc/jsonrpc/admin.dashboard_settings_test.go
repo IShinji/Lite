@@ -22,6 +22,10 @@ func TestNormalizeDashboardSettingsDefaults(t *testing.T) {
 	assert.Len(t, normalized.Modules, len(dashboardModuleOrder))
 	for _, module := range normalized.Modules {
 		assert.True(t, dashboardModuleSpanAllowed(module.Span))
+		if module.ID == dashboardModuleRenewalCalendar {
+			assert.Equal(t, 4, module.Span)
+			assert.True(t, module.Enabled)
+		}
 	}
 	enabled := make([]string, 0)
 	for _, module := range normalized.Modules {
@@ -51,6 +55,11 @@ func TestNormalizeDashboardSettingsPreservesOrderAndAppendsMissingModules(t *tes
 	assert.Equal(t, dashboardModuleServerStatus, normalized.Modules[1].ID)
 	assert.Len(t, normalized.Modules, len(dashboardModuleOrder))
 	for _, module := range normalized.Modules[2:] {
+		if module.ID == dashboardModuleRenewalCalendar {
+			assert.True(t, module.Enabled)
+			assert.Equal(t, 4, module.Span)
+			continue
+		}
 		assert.False(t, module.Enabled)
 	}
 }

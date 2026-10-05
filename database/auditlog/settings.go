@@ -25,6 +25,7 @@ var longSettingKeys = map[string]struct{}{
 	"custom_head":           {},
 	"custom_body":           {},
 	"notification_template": {},
+	"notification_routes":   {},
 }
 
 // Companion values are written by the server next to a field the user edits.
@@ -36,6 +37,7 @@ var ignoredSettingKeys = map[string]struct{}{
 	"metric_downsampling_enabled":   {},
 	"session_ttl_capped_v1":         {},
 	"tempory_share_token_expire_at": {},
+	"notification_routes_migrated":  {},
 }
 
 // SettingChanges compares the saved patch with the previous settings.

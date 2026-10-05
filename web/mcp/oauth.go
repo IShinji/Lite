@@ -606,8 +606,8 @@ func handleRefreshToken(c *gin.Context, values url.Values) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant"})
 		return
 	}
-	// Validate client binding BEFORE joining a concurrent/retry response.
-	if clientID != "" && token.ClientID != clientID {
+	// An empty client id must not receive a cached or rotated token pair.
+	if clientID != token.ClientID {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_client"})
 		return
 	}

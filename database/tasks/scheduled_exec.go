@@ -2,6 +2,7 @@ package tasks
 
 import (
 	"errors"
+	"sort"
 	"time"
 
 	"github.com/nuomiiiii/lite/database/dbcore"
@@ -103,24 +104,69 @@ func SaveScheduledExec(row *models.ScheduledExec) error {
 func ListDueScheduledExecs(now time.Time) ([]models.ScheduledExec, error) {
 	var rows []models.ScheduledExec
 	err := dbcore.GetDBInstance().
-		Where("enabled = ? AND next_run_at IS NOT NULL AND next_run_at <= ?", true, now.UTC()).
-		Order("next_run_at asc, id asc").
+		Where("enabled = ? AND next_run_at IS NOT NULL", true).
 		Find(&rows).Error
-	return rows, err
+	if err != nil {
+		return nil, err
+	}
+	return filterDueScheduledExecs(rows, now), nil
+}
+
+// SQLite stores time.Time as text with the value's own offset. Daily, weekly,
+// and monthly slots are saved in Beijing, so the text ends in "+08:00", while
+// a UTC parameter ends in "+00:00". Text order is not instant order, and exact
+// text equality never matches, so the due check and the claim both happen on
+// the parsed instant. The schedule kind is not part of that comparison.
+func filterDueScheduledExecs(rows []models.ScheduledExec, now time.Time) []models.ScheduledExec {
+	due := make([]models.ScheduledExec, 0, len(rows))
+	for _, row := range rows {
+		if row.NextRunAt != nil && !row.NextRunAt.After(now) {
+			due = append(due, row)
+		}
+	}
+	sort.Slice(due, func(i, j int) bool {
+		if due[i].NextRunAt.Equal(*due[j].NextRunAt) {
+			return due[i].ID < due[j].ID
+		}
+		return due[i].NextRunAt.Before(*due[j].NextRunAt)
+	})
+	return due
+}
+
+func sameInstant(a, b time.Time) bool {
+	return !a.IsZero() && !b.IsZero() && a.UTC().Equal(b.UTC())
 }
 
 // ClaimScheduledExec moves the next run forward only when the task is still
 // enabled and still due at the observed time. A save that already changed
 // next_run_at does not take this round.
 func ClaimScheduledExec(id string, expectedNext time.Time, next time.Time, last time.Time) (bool, error) {
-	now := time.Now().UTC()
-	result := dbcore.GetDBInstance().Model(&models.ScheduledExec{}).
-		Where("id = ? AND enabled = ? AND next_run_at = ?", id, true, expectedNext.UTC()).
-		Updates(map[string]any{
-			"next_run_at": next.UTC(),
-			"last_run_at": last.UTC(),
-			"updated_at":  now,
-		})
+	var claimed bool
+	err := dbcore.GetDBInstance().Transaction(func(tx *gorm.DB) error {
+		ok, err := claimScheduledExec(tx, id, expectedNext, next, last)
+		claimed = ok
+		return err
+	})
+	return claimed, err
+}
+
+func claimScheduledExec(tx *gorm.DB, id string, expectedNext time.Time, next time.Time, last time.Time) (bool, error) {
+	var row models.ScheduledExec
+	err := tx.Where("id = ? AND enabled = ?", id, true).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if row.NextRunAt == nil || !sameInstant(*row.NextRunAt, expectedNext) {
+		return false, nil
+	}
+	result := tx.Model(&models.ScheduledExec{}).Where("id = ?", id).Updates(map[string]any{
+		"next_run_at": next.UTC(),
+		"last_run_at": last.UTC(),
+		"updated_at":  time.Now().UTC(),
+	})
 	if result.Error != nil {
 		return false, result.Error
 	}

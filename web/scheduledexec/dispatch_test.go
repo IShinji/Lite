@@ -61,8 +61,11 @@ func TestClaimAndBusyMatchAudit(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(src)
-	if !strings.Contains(text, `Where("id = ? AND enabled = ? AND next_run_at = ?"`) {
+	if !strings.Contains(text, "sameInstant(*row.NextRunAt, expectedNext)") {
 		t.Fatal("claim does not require the observed next_run_at")
+	}
+	if strings.Contains(text, "next_run_at <= ?") || strings.Contains(text, "next_run_at = ?") {
+		t.Fatal("due check still compares timestamp text")
 	}
 	busy := text
 	if start := strings.Index(text, "func ScheduledExecBusy"); start >= 0 {

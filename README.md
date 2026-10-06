@@ -11,9 +11,6 @@ Lite 是一款轻量、自托管的服务器监控与运维管理工具。服务
 
 **当前正式版：Lite [`2.3.7`](https://github.com/nuomiiiii/Lite/releases/tag/2.3.7) · 配套 Agent [`2.3.6.0`](https://github.com/nuomiiiii/Lite-agent/releases/tag/2.3.6.0) · 默认主题 [`1.2.4`](https://github.com/nuomiiiii/Lite-theme/releases/tag/v1.2.4)**
 
-> [!IMPORTANT]
-> 系统 Web UI 与公开大屏主题独立：Lite Web 负责管理后台、远程终端等系统页面，主题只影响公开大屏。默认和保底主题都是 [Lite-Theme](https://github.com/nuomiiiii/Lite-theme)，可独立更新，并在已有其他可用主题时删除；主题管理始终要求至少保留一个可用主题。原经典主题已拆分为独立的 [lite-Classic](https://github.com/nuomiiiii/lite-Classic)，不再随 Lite 内置。从 Nezha / 旧默认主题升级时会迁到 Lite-Theme。
-
 [使用手册](https://nuomiiiii.github.io/Lite-document/) · [快速开始](#快速开始) · [功能概览](#功能概览) · [升级说明](#从旧版本升级) · [Agent](#agent-与远程管理) · [MCP 代理](#mcp-代理与-ai-授权) · [完整更新日志](https://github.com/nuomiiiii/lite/releases)
 
 > [!WARNING]

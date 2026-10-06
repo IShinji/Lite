@@ -9,7 +9,7 @@ Lite 是一款轻量、自托管的服务器监控与运维管理工具。服务
 
 本项目基于 [komari-monitor/komari](https://github.com/komari-monitor/komari) 持续开发，重点改善低配置主控上的数据库占用、历史查询和维护负载，同时提供流量管理、成本中心、备份迁移、接入安全与适配电脑和手机的管理界面。
 
-**当前正式版：Lite [`2.3.7`](https://github.com/nuomiiiii/Lite/releases/tag/2.3.7) · 配套 Agent [`2.3.3.7`](https://github.com/nuomiiiii/Lite-agent/releases/tag/2.3.3.7) · 默认主题 [`1.2.4`](https://github.com/nuomiiiii/Lite-theme/releases/tag/v1.2.4)**
+**当前正式版：Lite [`2.3.7`](https://github.com/nuomiiiii/Lite/releases/tag/2.3.7) · 配套 Agent [`2.3.6.0`](https://github.com/nuomiiiii/Lite-agent/releases/tag/2.3.6.0) · 默认主题 [`1.2.4`](https://github.com/nuomiiiii/Lite-theme/releases/tag/v1.2.4)**
 
 > [!IMPORTANT]
 > 系统 Web UI 与公开大屏主题独立：Lite Web 负责管理后台、远程终端等系统页面，主题只影响公开大屏。默认和保底主题都是 [Lite-Theme](https://github.com/nuomiiiii/Lite-theme)，可独立更新，并在已有其他可用主题时删除；主题管理始终要求至少保留一个可用主题。原经典主题已拆分为独立的 [lite-Classic](https://github.com/nuomiiiii/lite-Classic)，不再随 Lite 内置。从 Nezha / 旧默认主题升级时会迁到 Lite-Theme。
@@ -112,7 +112,7 @@ chmod +x Lite-linux-amd64
 
 ## Agent 与远程管理
 
-Lite `2.3.7` 推荐配套 [Lite-agent `2.3.3.7`](https://github.com/nuomiiiii/Lite-agent/releases/tag/2.3.3.7)。先在后台添加节点，再打开该节点的“节点配置 → 部署指令”，复制完整命令到目标服务器执行。自动发现注册已下线，新安装和 Docker 重建均使用具体节点的部署指令。
+Lite `2.3.7` 推荐配套 [Lite-agent `2.3.6.0`](https://github.com/nuomiiiii/Lite-agent/releases/tag/2.3.6.0)。先在后台添加节点，再打开该节点的“节点配置 → 部署指令”，复制完整命令到目标服务器执行。自动发现注册已下线，新安装和 Docker 重建均使用具体节点的部署指令。
 
 远程终端、文件管理和远程执行需要同时开启 Lite“系统设置 → 通用 → 允许远程管理”与 Agent 本地 `--enable-remote-control`，新安装默认关闭。进入远程功能时，已启用通行密钥的账号可用通行密钥验证；已启用两步验证但未使用通行密钥时输入当前验证码；未启用时重新输入管理员密码。浏览器远程终端单次最长 6 小时，空闲 30 分钟会结束。
 

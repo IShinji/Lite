@@ -34,7 +34,10 @@ func projectTaskResults(results []models.TaskResult) []map[string]any {
 	return out
 }
 
-func adminGetTasks(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+func adminGetTasks(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	if err := denyAPIKey(ctx); err != nil {
+		return nil, err
+	}
 	dbTasks, err := tasks.GetAllTasks()
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to retrieve tasks: "+err.Error(), nil)
@@ -55,7 +58,10 @@ func adminGetTasks(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcE
 	return responseTasks, nil
 }
 
-func adminGetTaskById(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+func adminGetTaskById(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	if err := denyAPIKey(ctx); err != nil {
+		return nil, err
+	}
 	var params struct {
 		TaskID string `json:"task_id"`
 	}
@@ -82,7 +88,10 @@ func adminGetTaskById(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.Jso
 	}, nil
 }
 
-func adminGetTasksByClientId(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+func adminGetTasksByClientId(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	if err := denyAPIKey(ctx); err != nil {
+		return nil, err
+	}
 	var params struct {
 		UUID string `json:"uuid"`
 	}
@@ -100,7 +109,10 @@ func adminGetTasksByClientId(_ context.Context, req *rpc.JsonRpcRequest) (any, *
 	return list, nil
 }
 
-func adminGetSpecificTaskResult(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+func adminGetSpecificTaskResult(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	if err := denyAPIKey(ctx); err != nil {
+		return nil, err
+	}
 	var params struct {
 		TaskID string `json:"task_id"`
 		UUID   string `json:"uuid"`
@@ -119,7 +131,10 @@ func adminGetSpecificTaskResult(_ context.Context, req *rpc.JsonRpcRequest) (any
 	return result, nil
 }
 
-func adminGetTaskResultsByTaskId(_ context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+func adminGetTaskResultsByTaskId(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	if err := denyAPIKey(ctx); err != nil {
+		return nil, err
+	}
 	var params struct {
 		TaskID string `json:"task_id"`
 	}

@@ -2,7 +2,9 @@ package jsonrpc
 
 import (
 	"context"
+	"strings"
 
+	"github.com/nuomiiiii/lite/database/accounts"
 	"github.com/nuomiiiii/lite/pkg/config"
 	"github.com/nuomiiiii/lite/pkg/rpc"
 )
@@ -53,8 +55,26 @@ func Dispatch(ctx context.Context, meta *rpc.ContextMeta, req *rpc.JsonRpcReques
 
 		return rpc.ErrorResponse(req.ID, rpc.PermissionDenied, "Permission denied", nil)
 	}
+	if adminSessionRejected(meta, req.Method) {
+		return rpc.ErrorResponse(req.ID, rpc.PermissionDenied, "session expired", nil)
+	}
 
 	return rpc.CallWithContext(rpc.NewContextWithMeta(ctx, meta), req.ID, req.Method, req.Params)
+}
+
+// adminSessionRejected rejects a human administrator whose login session is gone.
+// API keys are unchanged here. Internal calls have no session token and stay allowed.
+func adminSessionRejected(meta *rpc.ContextMeta, method string) bool {
+	if meta == nil || meta.Principal == nil || !strings.HasPrefix(method, "admin:") {
+		return false
+	}
+	if meta.Principal.IsAPIKey || meta.Principal.Type == rpc.PrincipalAPIKey {
+		return false
+	}
+	if meta.SessionToken == "" {
+		return false
+	}
+	return !accounts.SessionStillValid(meta.Principal.UserUUID, meta.SessionToken)
 }
 
 // OnInternalRequest 内部调用 RPC 方法（如服务端代码代发请求），仅携带权限分组。

@@ -294,7 +294,11 @@ func getDeploymentProfile(db *gorm.DB, clientUUID string) (DeploymentProfile, bo
 }
 
 func SaveDeploymentProfileForDispatch(clientUUID string, profile DeploymentProfile) (DeploymentProfile, DeploymentDeliveryState, bool, error) {
-	return saveDeploymentProfileForDispatch(dbcore.GetDBInstance(), clientUUID, profile)
+	saved, state, changed, err := saveDeploymentProfileForDispatch(dbcore.GetDBInstance(), clientUUID, profile)
+	if err == nil {
+		invalidateClientListCache()
+	}
+	return saved, state, changed, err
 }
 
 func saveDeploymentProfileForDispatch(db *gorm.DB, clientUUID string, profile DeploymentProfile) (DeploymentProfile, DeploymentDeliveryState, bool, error) {
@@ -383,7 +387,11 @@ func saveDeploymentProfileForDispatch(db *gorm.DB, clientUUID string, profile De
 }
 
 func MarkDeploymentConfigSent(clientUUID string, revision uint64) (bool, error) {
-	return markDeploymentConfigSent(dbcore.GetDBInstance(), clientUUID, revision)
+	sent, err := markDeploymentConfigSent(dbcore.GetDBInstance(), clientUUID, revision)
+	if err == nil && sent {
+		invalidateClientListCache()
+	}
+	return sent, err
 }
 
 func markDeploymentConfigSent(db *gorm.DB, clientUUID string, revision uint64) (bool, error) {
@@ -402,7 +410,11 @@ func markDeploymentConfigSent(db *gorm.DB, clientUUID string, revision uint64) (
 }
 
 func CompleteDeploymentConfig(clientUUID string, result v2.ConfigResultParams) (bool, error) {
-	return completeDeploymentConfig(dbcore.GetDBInstance(), clientUUID, result)
+	done, err := completeDeploymentConfig(dbcore.GetDBInstance(), clientUUID, result)
+	if err == nil && done {
+		invalidateClientListCache()
+	}
+	return done, err
 }
 
 func completeDeploymentConfig(db *gorm.DB, clientUUID string, result v2.ConfigResultParams) (bool, error) {
@@ -668,6 +680,7 @@ func adoptDeploymentRuntimeConfig(db *gorm.DB, clientUUID, platform string, conf
 		return false, err
 	}
 	adopted := false
+	changed := false
 	err = db.Transaction(func(tx *gorm.DB) error {
 		var client models.Client
 		if err := tx.Select("uuid", "traffic_reset_day", "traffic_reset_time", "traffic_reset_timezone").First(&client, "uuid = ?", clientUUID).Error; err != nil {
@@ -736,6 +749,7 @@ func adoptDeploymentRuntimeConfig(db *gorm.DB, clientUUID, platform string, conf
 			if len(updates) == 0 {
 				return nil
 			}
+			changed = true
 			if existing.SavedAt == nil {
 				savedAt := existing.UpdatedAt
 				if savedAt.IsZero() {
@@ -748,6 +762,7 @@ func adoptDeploymentRuntimeConfig(db *gorm.DB, clientUUID, platform string, conf
 				Updates(updates).Error
 		}
 		adopted = true
+		changed = true
 		if client.TrafficResetDay == nil {
 			if err := tx.Model(&models.Client{}).Where("uuid = ?", clientUUID).
 				Updates(trafficResetClientUpdates(reported)).Error; err != nil {
@@ -756,5 +771,8 @@ func adoptDeploymentRuntimeConfig(db *gorm.DB, clientUUID, platform string, conf
 		}
 		return nil
 	})
+	if err == nil && changed {
+		invalidateClientListCache()
+	}
 	return adopted, err
 }

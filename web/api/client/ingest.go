@@ -95,6 +95,9 @@ func ingestTaskResult(uuid string, params v2.TaskResultParams) error {
 	completed := mcp.CompleteOperation(params.TaskID, uuid, params)
 	err := tasks.SaveIncomingTaskResult(params.TaskID, uuid, params.Result, params.Status, params.ExitCode, finishedAt)
 	if err == nil || completed {
+		// Drop the queued copy. Leaving it until the event TTL lets a later
+		// expiry write "delivery timeout" over the output the node just sent.
+		agent_runtime.RemoveV2EventsByTaskID(uuid, params.TaskID)
 		return nil
 	}
 	return err

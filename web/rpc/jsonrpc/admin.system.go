@@ -57,7 +57,7 @@ func init() {
 	reg("testGeoip", adminTestGeoip, "Test GeoIP lookup")
 
 	agent_runtime.SetExpiredV2ExecHandler(func(uuid, taskID string) {
-		if err := persistIncomingTaskResult(taskID, uuid, v2.DeliveryTimeoutTaskResult, "", -1, time.Now().UTC()); err != nil {
+		if err := persistIncomingTaskResult(taskID, uuid, v2.DeliveryTimeoutTaskResult, v2.TaskResultStatusInterrupted, -1, time.Now().UTC()); err != nil {
 			logger.Errorf("rpc", "failed to persist exec delivery timeout for task %s client %s: %v", taskID, uuid, err)
 		}
 		mcp.CompleteOperation(taskID, uuid, v2.TaskResultParams{
@@ -318,7 +318,7 @@ func adminExec(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcE
 	if len(params.Clients) == 0 {
 		return nil, rpc.MakeError(rpc.InvalidParams, "clients is required", nil)
 	}
-	expires, err := remotectl.TakeExecGrant(params.Grant, meta.Principal.UserUUID, meta.SessionToken, params.PageID)
+	expires, epoch, err := remotectl.TakeExecGrant(params.Grant, meta.Principal.UserUUID, meta.SessionToken, params.PageID)
 	if err != nil {
 		if remotectl.IsRateLimited(err) {
 			return nil, rpc.MakeError(rpc.PermissionDenied, err.Error(), nil)
@@ -395,7 +395,7 @@ func adminExec(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcE
 	}
 	actor, ip := auditActor(ctx)
 	auditlog.Event(ip, actor, "warn", "audit.terminal_task", map[string]string{"id": taskId})
-	if nextGrant, nextExpires, rotateErr := remotectl.RotateExecGrant(meta.Principal.UserUUID, meta.SessionToken, params.PageID, expires); rotateErr == nil {
+	if nextGrant, nextExpires, rotateErr := remotectl.RotateExecGrant(meta.Principal.UserUUID, meta.SessionToken, params.PageID, expires, epoch); rotateErr == nil {
 		result["next_grant"] = nextGrant
 		result["expires_at"] = nextExpires.UTC()
 	}

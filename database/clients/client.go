@@ -50,6 +50,7 @@ func DeleteClient(clientUuid string) error {
 		logger.Errorf("metricstore", "Client %s was deleted; metric cleanup remains queued: %v", clientUuid, err)
 	}
 	trafficledger.InvalidateCalibratedCycleCache()
+	invalidateClientListCache()
 	if pingTasksChanged {
 		if err := tasks.ReloadPingSchedule(); err != nil {
 			return err
@@ -221,7 +222,11 @@ func deleteLegacyClientRows(tx *gorm.DB, clientUUID string) error {
 }
 
 func SaveClientInfo(update map[string]interface{}) error {
-	return saveClientInfoWithAutoOrder(dbcore.GetDBInstance(), update, autoOrderNewClientsEnabled())
+	err := saveClientInfoWithAutoOrder(dbcore.GetDBInstance(), update, autoOrderNewClientsEnabled())
+	if err == nil {
+		invalidateClientListCache()
+	}
+	return err
 }
 
 func autoOrderNewClientsEnabled() bool {
@@ -438,7 +443,7 @@ func orderClientAfterRegionPeers(ordered []clientOrderState, clientUUID, region 
 
 // UpdateClientOrder applies an administrator-provided order atomically.
 func UpdateClientOrder(order map[string]int) error {
-	return dbcore.GetDBInstance().Transaction(func(tx *gorm.DB) error {
+	err := dbcore.GetDBInstance().Transaction(func(tx *gorm.DB) error {
 		for clientUUID, weight := range order {
 			if err := tx.Model(&models.Client{}).Where("uuid = ?", clientUUID).Update("weight", weight).Error; err != nil {
 				return err
@@ -446,6 +451,10 @@ func UpdateClientOrder(order map[string]int) error {
 		}
 		return nil
 	})
+	if err == nil {
+		invalidateClientListCache()
+	}
+	return err
 }
 
 // CreateClient 创建新客户端
@@ -466,6 +475,7 @@ func CreateClient() (clientUUID, token string, err error) {
 	if err := notificationdefaults.ApplyDefaultsToNewClient(clientUUID); err != nil {
 		logger.ErrorArgs("clients", "Failed to apply notification defaults to new client:", err)
 	}
+	invalidateClientListCache()
 	return clientUUID, token, nil
 }
 
@@ -488,6 +498,7 @@ func CreateClientWithName(name string) (clientUUID, token string, err error) {
 	if err := notificationdefaults.ApplyDefaultsToNewClient(clientUUID); err != nil {
 		logger.ErrorArgs("clients", "Failed to apply notification defaults to new client:", err)
 	}
+	invalidateClientListCache()
 	return clientUUID, token, nil
 }
 
@@ -519,9 +530,6 @@ func GetClientByUUID(uuid string) (client models.Client, err error) {
 	db := dbcore.GetDBInstance()
 	err = db.Where("uuid = ?", uuid).First(&client).Error
 	if err != nil {
-		return models.Client{}, err
-	}
-	if err := applyClientDisplayFieldsAndPersist(db, []models.Client{client}, time.Now().UTC()); err != nil {
 		return models.Client{}, err
 	}
 	applyClientDisplayFields(&client, time.Now().UTC())
@@ -627,12 +635,28 @@ func rotateClientToken(db *gorm.DB, uuid string, gracePeriod time.Duration) (tok
 			"updated_at":                now,
 		}).Error
 	})
+	if err == nil {
+		invalidateClientListCache()
+	}
 	return token, previousExpiresAt, err
 }
 
 func GetAllClientBasicInfo() (clients []models.Client, err error) {
-	return getClientBasicInfo(dbcore.GetDBInstance())
+	clientListGate.Lock()
+	defer clientListGate.Unlock()
+	now := time.Now()
+	if cached, ok := basicInfoCache.get(now, clientListCacheTTL); ok {
+		return cached, nil
+	}
+	clients, err = getClientBasicInfo(dbcore.GetDBInstance())
+	if err != nil {
+		return nil, err
+	}
+	basicInfoCache.set(now, clients)
+	return cloneClientList(clients), nil
 }
+
+var clientListGate sync.Mutex
 
 func GetClientBasicInfoByUUIDs(uuids []string) (clients []models.Client, err error) {
 	if len(uuids) == 0 {
@@ -647,8 +671,9 @@ func getClientBasicInfo(query *gorm.DB) (clients []models.Client, err error) {
 		return nil, err
 	}
 	baseDB := query.Session(&gorm.Session{NewDB: true})
-	if err := applyClientDisplayFieldsAndPersist(baseDB, clients, time.Now().UTC()); err != nil {
-		return nil, err
+	now := time.Now().UTC()
+	for index := range clients {
+		applyClientDisplayFields(&clients[index], now)
 	}
 	if err := applyClientDeploymentStatuses(baseDB, clients); err != nil {
 		return nil, err
@@ -727,6 +752,7 @@ func saveClientWithDispatchAt(db *gorm.DB, updates map[string]interface{}, sourc
 		return ClientDispatch{}, err
 	}
 	trafficledger.InvalidateCalibratedCycleCache()
+	invalidateClientListCache()
 	return dispatch, nil
 }
 
@@ -1218,9 +1244,13 @@ func AdoptTrafficResetDay(clientUUID string, value interface{}) error {
 		return nil
 	}
 	db := dbcore.GetDBInstance()
-	return db.Model(&models.Client{}).
+	err = db.Model(&models.Client{}).
 		Where("uuid = ? AND traffic_reset_day IS NULL", clientUUID).
 		Update("traffic_reset_day", *day).Error
+	if err == nil {
+		invalidateClientListCache()
+	}
+	return err
 }
 
 var (
@@ -1257,5 +1287,7 @@ func SetMCPCapability(uuid string, full bool, version int) {
 		"mcp_full_version": version,
 	}).Error; err != nil {
 		logger.Errorf("mcp", "failed to record MCP capability for %s: %v", uuid, err)
+		return
 	}
+	invalidateClientListCache()
 }

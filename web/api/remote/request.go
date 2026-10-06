@@ -164,6 +164,7 @@ func Authorize(c *gin.Context) {
 	if scope == "" {
 		scope = remotectl.ScopeRemote
 	}
+	confirmedEpoch := accounts.UserSecurityEpoch(principal.UserUUID)
 	var err error
 	if len(request.Credential) > 0 || request.CeremonyID != "" {
 		err = remotectl.ReauthorizePasskey(principal.UserUUID, c.ClientIP(), func() error {
@@ -176,7 +177,7 @@ func Authorize(c *gin.Context) {
 		respondGrantError(c, err)
 		return
 	}
-	grant, expires, err := remotectl.IssueGrant(principal.UserUUID, loginSession, scope, request.PageID)
+	grant, expires, err := remotectl.IssueGrantAtEpoch(principal.UserUUID, loginSession, scope, request.PageID, confirmedEpoch)
 	if err != nil {
 		respondGrantError(c, err)
 		return

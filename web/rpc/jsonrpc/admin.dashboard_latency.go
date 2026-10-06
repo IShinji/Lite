@@ -72,9 +72,10 @@ func loadDashboardLatency(ctx context.Context, clientList []models.Client, pingT
 			End:        now,
 			Order:      metric.OrderAsc,
 		},
-		Aggregation:    metric.AggAvg,
-		Interval:       interval,
-		PreserveSeries: true,
+		Aggregation:                   metric.AggAvg,
+		Interval:                      interval,
+		PreserveSeries:                true,
+		ClosedBucketsFromMatchingTier: true,
 	}, now)
 	if err != nil {
 		return result, fmt.Errorf("query six-hour latency window: %w", err)

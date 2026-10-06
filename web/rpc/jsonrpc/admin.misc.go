@@ -23,6 +23,7 @@ import (
 	"github.com/nuomiiiii/lite/web/mcp"
 	"github.com/nuomiiiii/lite/web/passkey"
 	"github.com/nuomiiiii/lite/web/remotectl"
+	"github.com/nuomiiiii/lite/web/scheduledexec"
 )
 
 // admin.misc.go
@@ -303,8 +304,16 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 				v2.MethodAgentMCPRevoke,
 			)
 		})
-		if err := cancelUndeliveredRemoteExec(removed); err != nil {
-			return nil, rpc.MakeError(rpc.InternalError, "远程管理已关闭，但未能写入已取消任务结果: "+err.Error(), nil)
+		cancelErr := cancelUndeliveredRemoteExec(removed)
+		stopErr := scheduledexec.StopForRemoteOff()
+		if cancelErr != nil && stopErr != nil {
+			return nil, rpc.MakeError(rpc.InternalError, "远程管理已关闭，但未能写入已取消任务结果: "+cancelErr.Error()+"；未能停用定时任务: "+stopErr.Error(), nil)
+		}
+		if cancelErr != nil {
+			return nil, rpc.MakeError(rpc.InternalError, "远程管理已关闭，但未能写入已取消任务结果: "+cancelErr.Error(), nil)
+		}
+		if stopErr != nil {
+			return nil, rpc.MakeError(rpc.InternalError, "远程管理已关闭，但未能停用定时任务: "+stopErr.Error(), nil)
 		}
 	}
 	if raw, ok := cfg[config.AllowMCPKey]; ok && previousMCP && !toBool(raw, false) {
@@ -460,6 +469,9 @@ func cancelUndeliveredRemoteExec(removed []agent.RemovedV2Event) error {
 	var errs []error
 	for _, item := range removed {
 		if item.Event.Method != v2.MethodAgentExec {
+			continue
+		}
+		if item.Event.HandedOff {
 			continue
 		}
 		taskID := agent.ExecTaskID(item.Event)

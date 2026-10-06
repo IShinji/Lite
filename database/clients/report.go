@@ -33,6 +33,7 @@ func getClientUUIDByToken(db *gorm.DB, token string, now time.Time) (clientUUID 
 			Updates(map[string]interface{}{"previous_token": "", "previous_token_expires_at": nil}).Error; err != nil {
 			return "", err
 		}
+		invalidateClientListCache()
 	}
 	return client.UUID, nil
 }

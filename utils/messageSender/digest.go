@@ -34,6 +34,20 @@ type digestBatch struct {
 	waiters []chan error
 }
 
+// digestibleKind is an alert or its recovery. Login and the scheduled
+// traffic reports stay one message each.
+//
+// digestibleKind 是告警或对应的恢复。登录和流量日报、周报、月报仍各自单独发送。
+func digestibleKind(kind string) bool {
+	switch strings.TrimSpace(kind) {
+	case KindOffline, KindOnline, KindLoad, KindTraffic, KindExpire, KindRenew,
+		KindPingLoss, KindPingLatency, KindReturnRoute, KindMainlandReachability:
+		return true
+	default:
+		return false
+	}
+}
+
 func digestFrom(cfg map[string]any) (bool, time.Duration) {
 	enabled, ok := cfg[config.NotificationDigestEnabledKey].(bool)
 	if !ok || !enabled {

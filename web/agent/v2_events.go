@@ -57,10 +57,29 @@ func DispatchV2ExecEvent(uuid string, params v2.ExecParams) (queued bool, notifi
 	if conn := GetConnectedClient(uuid); conn != nil {
 		payload := v2.Request{JSONRPC: v2.Version, Method: event.Method, Params: event.Params, ID: event.ID}
 		if conn.WriteJSON(payload) == nil {
+			markV2EventHandedOff(uuid, event.ID)
 			return true, true
 		}
 	}
 	return true, false
+}
+
+func markV2EventHandedOff(uuid, eventID string) {
+	if uuid == "" || eventID == "" {
+		return
+	}
+	v2EventMu.Lock()
+	defer v2EventMu.Unlock()
+	q := v2EventQueues[uuid]
+	if q == nil {
+		return
+	}
+	for i := range q.events {
+		if q.events[i].ID == eventID {
+			q.events[i].HandedOff = true
+			return
+		}
+	}
 }
 
 func DispatchV2Config(uuid string, params v2.ConfigParams) (v2.Event, bool, bool) {
@@ -274,6 +293,9 @@ func handleExpiredV2Events(uuid string, events []v2.Event) {
 		if event.Method != v2.MethodAgentExec && event.Method != v2.MethodAgentMCPExec && event.Method != v2.MethodAgentMCPFile {
 			continue
 		}
+		if event.Method == v2.MethodAgentExec && event.HandedOff {
+			continue
+		}
 		taskID := ExecTaskID(event)
 		if event.Method != v2.MethodAgentExec {
 			taskID = MCPTaskID(event)
@@ -365,6 +387,44 @@ func MCPTaskID(event v2.Event) string {
 		return file.TaskID
 	}
 	return file.OperationID
+}
+
+// RemoveExecEventsByTaskIDs drops queued agent.exec events for these tasks.
+// Already pulled commands are left alone. The caller must hold the remote
+// delivery mutex when this runs beside DispatchV2ExecEvent.
+func RemoveExecEventsByTaskIDs(taskIDs []string) []RemovedV2Event {
+	if len(taskIDs) == 0 {
+		return nil
+	}
+	wanted := make(map[string]struct{}, len(taskIDs))
+	for _, id := range taskIDs {
+		if id != "" {
+			wanted[id] = struct{}{}
+		}
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+	v2EventMu.Lock()
+	defer v2EventMu.Unlock()
+	var removed []RemovedV2Event
+	for uuid, q := range v2EventQueues {
+		if q == nil {
+			continue
+		}
+		filtered := q.events[:0]
+		for _, event := range q.events {
+			if event.Method == v2.MethodAgentExec {
+				if _, ok := wanted[ExecTaskID(event)]; ok {
+					removed = append(removed, RemovedV2Event{UUID: uuid, Event: event})
+					continue
+				}
+			}
+			filtered = append(filtered, event)
+		}
+		q.events = filtered
+	}
+	return removed
 }
 
 func RemoveV2EventsByTaskID(uuid, taskID string) {
@@ -463,6 +523,9 @@ func RemoveV2EventQueue(uuid string) {
 func takeV2EventsLocked(q *v2EventQueue, limit int) []v2.Event {
 	if limit <= 0 || limit > len(q.events) {
 		limit = len(q.events)
+	}
+	for i := 0; i < limit; i++ {
+		q.events[i].HandedOff = true
 	}
 	events := make([]v2.Event, limit)
 	copy(events, q.events[:limit])

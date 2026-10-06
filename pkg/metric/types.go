@@ -353,6 +353,16 @@ type AggregateQuery struct {
 	// OmitTags is an internal read optimization for callers that only need the
 	// entity dimension. It is excluded from serialized query contracts.
 	OmitTags bool `json:"-"`
+	// ClosedBucketsFromMatchingTier reads each fully closed output bucket from
+	// the rollup tier with the same interval. The leading partial bucket and the
+	// bucket that still touches the raw boundary stay on the finest compatible
+	// tier, so the window and the open hour keep their current samples. It is
+	// excluded from serialized query contracts.
+	//
+	// ClosedBucketsFromMatchingTier 让已经完整结束的输出桶改读同间隔的 rollup 档。
+	// 窗口开头不满一桶、以及仍压住原始数据边界的那一桶，继续走最细的兼容档，
+	// 因此查询窗口和当前这一小时仍用现有样本。它不属于序列化查询协议。
+	ClosedBucketsFromMatchingTier bool `json:"-"`
 	// BucketLimit and BucketOffset page over the produced aggregate buckets, not
 	// the underlying raw points. They are applied consistently across every
 	// backend and aggregation type. The embedded Query.Limit/Query.Offset are

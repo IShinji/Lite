@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nuomiiiii/lite/database/dbcore"
 	"github.com/nuomiiiii/lite/database/models"
 	"github.com/nuomiiiii/lite/pkg/trafficreset"
 	"gorm.io/gorm"
@@ -58,6 +59,21 @@ func applyClientDisplayFields(client *models.Client, now time.Time) bool {
 		client.Region = client.RegionOverride
 	}
 	return changed
+}
+
+// PersistTrafficDisplayFields writes cycle rollovers that the list read only
+// applies in memory. The minute traffic check calls it, so opening the server
+// list does not update every row.
+//
+// PersistTrafficDisplayFields 把列表读取时只在内存里算的周期切换写回数据库。
+// 由每分钟的流量检查调用，因此打开服务器列表时不再逐台更新。
+func PersistTrafficDisplayFields() error {
+	db := dbcore.GetDBInstance()
+	var list []models.Client
+	if err := db.Find(&list).Error; err != nil {
+		return err
+	}
+	return applyClientDisplayFieldsAndPersist(db, list, time.Now().UTC())
 }
 
 func applyClientDisplayFieldsAndPersist(db *gorm.DB, clients []models.Client, now time.Time) error {

@@ -180,6 +180,29 @@ func TestDigestFlushReachesEveryChannel(t *testing.T) {
 	}
 }
 
+func TestDigestLeavesLoginAndTrafficReportsImmediate(t *testing.T) {
+	sender := &recordingSender{}
+	queued, _ := newDigestQueue()
+	restore := installDigestTest(t, sender, true, queued)
+	defer restore()
+
+	for _, kind := range []string{KindLogin, KindTrafficReportDaily, KindTrafficReportWeekly, KindTrafficReportMonthly} {
+		before := len(sender.events)
+		if err := SendEvent(models.EventMessage{Kind: kind, Event: kind, Message: "report"}); err != nil {
+			t.Fatal(err)
+		}
+		if queued.len() != 0 || len(sender.events) != before+1 {
+			t.Fatalf("%s queued %d events %d", kind, queued.len(), len(sender.events))
+		}
+	}
+	if err := SendEvent(models.EventMessage{Kind: KindOnline, Event: "Online", Clients: []models.Client{{UUID: "a", Name: "alpha"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if queued.len() != 1 || len(sender.events) != 4 {
+		t.Fatalf("online recovery queued %d events %d", queued.len(), len(sender.events))
+	}
+}
+
 func TestDigestDisabledSendsImmediately(t *testing.T) {
 	sender := &recordingSender{}
 	queued, _ := newDigestQueue()

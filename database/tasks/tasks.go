@@ -158,7 +158,9 @@ func isWeakIncomingTaskResult(result, status string) bool {
 	if status == "interrupted" {
 		return true
 	}
-	return result == "execution status unknown"
+	// A delivery timeout is the queue expiring, not the command's output.
+	// It must not replace a result the node already reported.
+	return result == "execution status unknown" || result == "delivery timeout"
 }
 
 func SaveTaskResults(taskId string, clientIDs []string, result string, exitCode int, timestamp time.Time) error {

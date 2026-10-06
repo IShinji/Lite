@@ -1107,6 +1107,12 @@ func doInitialize() error {
 	); err != nil {
 		logger.Errorf("dbcore", "Failed to create Task and TaskResult table, it may already exist: %v", err)
 	}
+	if err := instance.AutoMigrate(
+		&models.ScheduledExec{},
+		&models.ScheduledExecRun{},
+	); err != nil {
+		return fmt.Errorf("failed to create scheduled exec tables: %w", err)
+	}
 	if err := cleanupOrphanedClientData(instance); err != nil {
 		return fmt.Errorf("failed to clean orphaned client data: %w", err)
 	}

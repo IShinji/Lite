@@ -843,12 +843,94 @@ func (s *Store) seriesAcrossHandoffTiers(ctx context.Context, query AggregateQue
 	return pageBuckets(out, query.BucketLimit, query.BucketOffset), nil
 }
 
+// matchingClosedBucketSpan is the inclusive-exclusive rollup span of output
+// buckets that finished before the raw boundary. The finest tier still owns
+// [query start, closedLower) and [closedUpper, raw boundary).
+//
+// matchingClosedBucketSpan 是 raw 边界之前已经完整结束的输出桶，区间为
+// [closedLower, closedUpper)。最细档仍负责 [查询起点, closedLower) 和
+// [closedUpper, raw 边界)。
+func matchingClosedBucketSpan(query AggregateQuery, policy RollupPolicy, rawBoundary time.Time) (closedLower, closedUpper int64, ok bool) {
+	if !query.ClosedBucketsFromMatchingTier || query.Interval <= 0 {
+		return 0, 0, false
+	}
+	matched, finer := false, false
+	for _, tier := range policy.Tiers {
+		if tier.Interval <= 0 || query.Interval%tier.Interval != 0 {
+			continue
+		}
+		switch {
+		case tier.Interval == query.Interval:
+			matched = true
+		case tier.Interval < query.Interval:
+			finer = true
+		}
+	}
+	if !matched || !finer {
+		return 0, 0, false
+	}
+
+	interval := query.Interval.Nanoseconds()
+	start := query.Query.normalized().Start.UnixNano()
+	raw := rawBoundary.UTC().UnixNano()
+	closedLower = floorDivNano(start, interval)
+	if closedLower < start {
+		closedLower += interval
+	}
+	closedUpper = floorDivNano(raw, interval)
+	if closedUpper < closedLower {
+		closedLower, closedUpper = raw, raw
+	}
+	return closedLower, closedUpper, true
+}
+
+func rollupPolicyHasInterval(policy RollupPolicy, interval time.Duration) bool {
+	for _, tier := range policy.Tiers {
+		if tier.Interval == interval {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Store) collectSeriesAcrossHandoffTiers(ctx context.Context, query AggregateQuery, now time.Time, policy RollupPolicy, rawBoundary time.Time, hasWatermark, needDigest bool) (map[rollupKey]*rollupBucket, error) {
 	q := query.Query.normalized()
 	comp := policy.compression()
 	groups := make(map[rollupKey]*rollupBucket)
 	covered := make(map[string][]rollupCoverage)
 	youngBoundary := rawBoundary.UTC().UnixNano()
+	spanPolicy := policy
+	if query.ClosedBucketsFromMatchingTier {
+		spanPolicy = s.cfg.RollupPolicy
+	}
+	closedLower, closedUpper, useClosedTier := matchingClosedBucketSpan(query, spanPolicy, rawBoundary)
+	finestOpenTierScanned := false
+	foldSpan := func(resNano, scanLower, scanUpper int64) error {
+		if scanUpper < scanLower {
+			return nil
+		}
+		if s.sqliteStorageV4 && hasWatermark && !needDigest {
+			return s.foldSQLiteV4Rollups(ctx, s.reader(), q.MetricName, q.EntityID, q.Tags,
+				resNano, scanLower, scanUpper, groups, query.Interval, comp, query.PreserveSeries)
+		}
+		rows, err := s.scanRollupRowsBetween(ctx, q.MetricName, q.EntityID, q.Tags, resNano, scanLower, scanUpper, needDigest)
+		if err != nil {
+			return err
+		}
+		foldRollupRows(groups, rows, query.Interval, comp, query.PreserveSeries, needDigest)
+		if !hasWatermark {
+			for _, row := range rows {
+				identity := row.entityID + "\x00" + row.bucketData.tagsHash
+				covered[identity] = append(covered[identity], rollupCoverage{start: row.bucket, end: row.bucket + resNano})
+			}
+		}
+		return nil
+	}
+	if useClosedTier && !rollupPolicyHasInterval(policy, query.Interval) {
+		if err := foldSpan(query.Interval.Nanoseconds(), closedLower, closedUpper-1); err != nil {
+			return nil, err
+		}
+	}
 
 	for index, tier := range policy.Tiers {
 		lower := alignRollupRetentionCutoff(now.Add(-tier.Retention), tier.Interval).UnixNano()
@@ -856,10 +938,51 @@ func (s *Store) collectSeriesAcrossHandoffTiers(ctx context.Context, query Aggre
 			lower = alignRollupRetentionCutoff(now.Add(-tier.Retention), policy.Tiers[index+1].Interval).UnixNano()
 		}
 		if query.Interval < tier.Interval || query.Interval%tier.Interval != 0 {
-			youngBoundary = lower
+			if !useClosedTier {
+				youngBoundary = lower
+			}
 			continue
 		}
 		resNano := tier.Interval.Nanoseconds()
+		if useClosedTier && tier.Interval < query.Interval {
+			if !finestOpenTierScanned {
+				rawUpper := rawBoundary.UTC().UnixNano() - 1
+				headLower := q.Start.UnixNano()
+				if lower > headLower {
+					headLower = lower
+				}
+				headUpper := closedLower - 1
+				if headUpper > rawUpper {
+					headUpper = rawUpper
+				}
+				if err := foldSpan(resNano, headLower, headUpper); err != nil {
+					return nil, err
+				}
+				tailLower := closedUpper
+				if q.Start.UnixNano() > tailLower {
+					tailLower = q.Start.UnixNano()
+				}
+				if lower > tailLower {
+					tailLower = lower
+				}
+				if err := foldSpan(resNano, tailLower, rawUpper); err != nil {
+					return nil, err
+				}
+				finestOpenTierScanned = true
+			}
+			continue
+		}
+		if useClosedTier && tier.Interval == query.Interval {
+			scanLower := closedLower
+			if lower > scanLower {
+				scanLower = lower
+			}
+			if err := foldSpan(resNano, scanLower, closedUpper-1); err != nil {
+				return nil, err
+			}
+			youngBoundary = lower
+			continue
+		}
 		scanLower := q.Start.UnixNano()
 		if lower > scanLower {
 			scanLower = lower
@@ -868,26 +991,8 @@ func (s *Store) collectSeriesAcrossHandoffTiers(ctx context.Context, query Aggre
 		if youngBoundary != math.MinInt64 && youngBoundary-1 < scanUpper {
 			scanUpper = youngBoundary - 1
 		}
-		if scanUpper >= scanLower {
-			if s.sqliteStorageV4 && hasWatermark && !needDigest {
-				if err := s.foldSQLiteV4Rollups(ctx, s.reader(), q.MetricName, q.EntityID, q.Tags,
-					resNano, scanLower, scanUpper, groups, query.Interval, comp, query.PreserveSeries); err != nil {
-					return nil, err
-				}
-				youngBoundary = lower
-				continue
-			}
-			rows, err := s.scanRollupRowsBetween(ctx, q.MetricName, q.EntityID, q.Tags, resNano, scanLower, scanUpper, needDigest)
-			if err != nil {
-				return nil, err
-			}
-			foldRollupRows(groups, rows, query.Interval, comp, query.PreserveSeries, needDigest)
-			if !hasWatermark {
-				for _, row := range rows {
-					identity := row.entityID + "\x00" + row.bucketData.tagsHash
-					covered[identity] = append(covered[identity], rollupCoverage{start: row.bucket, end: row.bucket + resNano})
-				}
-			}
+		if err := foldSpan(resNano, scanLower, scanUpper); err != nil {
+			return nil, err
 		}
 		youngBoundary = lower
 	}

@@ -38,7 +38,11 @@ func (s *Store) handoffExpiredRollupTiersTx(ctx context.Context, metricName stri
 			}
 		}
 		buckets := coarsenStoredRollups(metricName, rows, coarse.Interval, comp)
-		n, err := s.mergeRollupBucketsTx(ctx, metricName, coarse.Interval, buckets, tx)
+		// Ping keeps a direct hour summary while minute buckets still exist.
+		// Replace that summary when the same hour later arrives through the
+		// retention ladder, instead of adding the samples a second time.
+		replaceExisting := metricName == sqliteMergedPingLatencyMetric && coarse.Interval == time.Hour
+		n, err := s.mergeRollupBucketsModeTx(ctx, metricName, coarse.Interval, buckets, replaceExisting, tx)
 		if err != nil {
 			return written, fmt.Errorf("metric: hand off %s tier to %s: %w", fine.Interval, coarse.Interval, err)
 		}

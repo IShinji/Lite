@@ -254,7 +254,7 @@ func (s *Store) compactMetricIncrementalChunkOnce(ctx context.Context, metricNam
 	}
 
 	if completed {
-		if err := s.deleteRollupsForIntervalsTx(ctx, metricName, obsoleteIntervals, tx); err != nil {
+		if err := s.deleteRollupsForIntervalsTx(ctx, metricName, obsoleteRollupIntervals(metricName, obsoleteIntervals), tx); err != nil {
 			return 0, false, err
 		}
 		n, err := s.handoffExpiredRollupTiersTx(ctx, metricName, now, policy, tx)
@@ -262,6 +262,9 @@ func (s *Store) compactMetricIncrementalChunkOnce(ctx context.Context, metricNam
 			return 0, false, err
 		}
 		written += n
+		if err := s.expireDirectPingHourBucketsTx(ctx, metricName, now, policy, tx); err != nil {
+			return 0, false, err
+		}
 	}
 	if err := s.persistCompactionWatermarkTx(ctx, metricName, chunkEnd, tx); err != nil {
 		return 0, false, err
@@ -400,7 +403,7 @@ func (s *Store) compactMetricOnce(ctx context.Context, metricName string, now ti
 		}
 	}
 
-	if err := s.deleteRollupsForIntervalsTx(ctx, metricName, obsoleteIntervals, tx); err != nil {
+	if err := s.deleteRollupsForIntervalsTx(ctx, metricName, obsoleteRollupIntervals(metricName, obsoleteIntervals), tx); err != nil {
 		return 0, err
 	}
 	written, err := s.compactMetricWithinTx(ctx, metricName, now, policy, tx)
@@ -506,8 +509,14 @@ func (s *Store) compactMetricIncrementalWithinTx(ctx context.Context, metricName
 	if err != nil {
 		return 0, err
 	}
+	if err := s.propagatePingClosedHoursTx(ctx, metricName, policy, delta, tx); err != nil {
+		return written, err
+	}
 	handedOff, err := s.handoffExpiredRollupTiersTx(ctx, metricName, now, policy, tx)
 	if err != nil {
+		return written, err
+	}
+	if err := s.expireDirectPingHourBucketsTx(ctx, metricName, now, policy, tx); err != nil {
 		return written, err
 	}
 	return written + handedOff, nil
@@ -524,11 +533,71 @@ func (s *Store) compactMetricIncrementalRangeWithinTx(ctx context.Context, metri
 	if err != nil {
 		return 0, err
 	}
+	if err := s.propagatePingClosedHoursTx(ctx, metricName, policy, delta, tx); err != nil {
+		return written, err
+	}
 	handedOff, err := s.handoffExpiredRollupTiersTx(ctx, metricName, before, policy, tx)
 	if err != nil {
 		return written, err
 	}
 	return written + handedOff, nil
+}
+
+// obsoleteRollupIntervals keeps the direct ping hour summary when retention
+// trimming would otherwise treat that resolution as unused.
+//
+// obsoleteRollupIntervals 在保留期裁剪把小时分辨率当成无用档时，仍留下延迟的
+// 直接小时汇总。
+func obsoleteRollupIntervals(metricName string, intervals []time.Duration) []time.Duration {
+	if metricName != sqliteMergedPingLatencyMetric {
+		return intervals
+	}
+	kept := make([]time.Duration, 0, len(intervals))
+	for _, interval := range intervals {
+		if interval == time.Hour {
+			continue
+		}
+		kept = append(kept, interval)
+	}
+	return kept
+}
+
+// propagatePingClosedHoursTx keeps an hour summary for ping latency while the
+// minute tier still owns those samples. Dashboard reads the finished hours
+// from this summary. The samples also stay in the minute tier.
+//
+// propagatePingClosedHoursTx 在分钟档仍保留这些样本时，为延迟再记一份小时汇总。
+// 仪表盘读取已经结束的小时时用这份汇总。样本本身仍留在分钟档。
+func (s *Store) propagatePingClosedHoursTx(ctx context.Context, metricName string, policy RollupPolicy, delta map[rollupKey]*rollupBucket, tx *sql.Tx) error {
+	if metricName != sqliteMergedPingLatencyMetric || len(delta) == 0 || len(policy.Tiers) == 0 {
+		return nil
+	}
+	finest := policy.Tiers[0].Interval
+	if finest <= 0 || time.Hour%finest != 0 {
+		return nil
+	}
+	hours := buildCoarserBucketsFromDelta(delta, time.Hour, policy.compression())
+	_, err := s.mergeRollupBucketsTx(ctx, metricName, time.Hour, hours, tx)
+	return err
+}
+
+// expireDirectPingHourBucketsTx drops hour summaries that outlive the minute
+// tier when the active policy has no hour tier of its own. A retained hour
+// tier is cleaned up by the normal retention ladder.
+//
+// expireDirectPingHourBucketsTx 在当前策略没有小时档时，删掉比分钟档更老的
+// 小时汇总。策略里本来就有小时档时，仍由原来的保留期限清理。
+func (s *Store) expireDirectPingHourBucketsTx(ctx context.Context, metricName string, now time.Time, policy RollupPolicy, tx *sql.Tx) error {
+	if metricName != sqliteMergedPingLatencyMetric || len(policy.Tiers) == 0 {
+		return nil
+	}
+	for _, tier := range policy.Tiers {
+		if tier.Interval == time.Hour {
+			return nil
+		}
+	}
+	cutoff := alignRollupRetentionCutoff(now.Add(-policy.Tiers[0].Retention), time.Hour)
+	return s.deleteRollupsBeforeTx(ctx, metricName, time.Hour, cutoff, tx)
 }
 
 // compactMetricFullWithinTx retains the rebuild behavior required when raw
@@ -888,6 +957,10 @@ func (s *Store) scanRollupRows(ctx context.Context, q querier, metricName string
 // compact run performs work proportional to new/late data rather than to the
 // complete retained history.
 func (s *Store) mergeRollupBucketsTx(ctx context.Context, metricName string, interval time.Duration, buckets map[rollupKey]*rollupBucket, tx *sql.Tx) (int, error) {
+	return s.mergeRollupBucketsModeTx(ctx, metricName, interval, buckets, false, tx)
+}
+
+func (s *Store) mergeRollupBucketsModeTx(ctx context.Context, metricName string, interval time.Duration, buckets map[rollupKey]*rollupBucket, replaceExisting bool, tx *sql.Tx) (int, error) {
 	if len(buckets) == 0 {
 		return 0, nil
 	}
@@ -918,7 +991,7 @@ func (s *Store) mergeRollupBucketsTx(ctx context.Context, metricName string, int
 		if err != nil {
 			return 0, err
 		}
-		if existing != nil {
+		if existing != nil && !replaceExisting {
 			existing.mergeStored(bucket)
 			bucket = existing
 		}

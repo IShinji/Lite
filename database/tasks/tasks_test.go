@@ -212,6 +212,27 @@ func TestSaveIncomingTaskResultDoesNotOverwriteFinishedWithInterrupted(t *testin
 	}
 }
 
+func TestSaveIncomingTaskResultDeliveryTimeoutDoesNotOverwriteFinished(t *testing.T) {
+	flags.DatabaseType = flags.DatabaseTypeSQLite
+	flags.DatabaseFile = "file:task_incoming_timeout_keep?mode=memory&cache=shared"
+	if err := CreateTask("task-keep-timeout", []string{"node-a"}, "ifconfig"); err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if err := SaveIncomingTaskResult("task-keep-timeout", "node-a", "inet 10.0.0.8", "finished", 0, time.Now().UTC()); err != nil {
+		t.Fatalf("save finished: %v", err)
+	}
+	if err := SaveIncomingTaskResult("task-keep-timeout", "node-a", "delivery timeout", "", -1, time.Now().UTC()); err != nil {
+		t.Fatalf("save timeout: %v", err)
+	}
+	got, err := GetSpecificTaskResult("task-keep-timeout", "node-a")
+	if err != nil {
+		t.Fatalf("GetSpecificTaskResult: %v", err)
+	}
+	if got.Result != "inet 10.0.0.8" || got.ExitCode == nil || *got.ExitCode != 0 {
+		t.Fatalf("delivery timeout replaced finished output: %#v", got)
+	}
+}
+
 func TestSaveIncomingTaskResultAllowsFinishedAfterTimeout(t *testing.T) {
 	flags.DatabaseType = flags.DatabaseTypeSQLite
 	flags.DatabaseFile = "file:task_incoming_timeout?mode=memory&cache=shared"

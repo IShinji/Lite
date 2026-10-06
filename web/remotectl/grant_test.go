@@ -4,8 +4,11 @@ import (
 	"errors"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/nuomiiiii/lite/database/accounts"
 )
 
 func consumeGrant(plain, userUUID, loginSession, scope, pageID string) error {
@@ -120,14 +123,14 @@ func TestTakeExecGrantIsSingleUse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gotExpires, err := TakeExecGrant(plain, "user-a", "login-a", "page-a")
+	gotExpires, _, err := TakeExecGrant(plain, "user-a", "login-a", "page-a")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !gotExpires.Equal(expires) {
 		t.Fatalf("expires = %v, want %v", gotExpires, expires)
 	}
-	if _, err := TakeExecGrant(plain, "user-a", "login-a", "page-a"); !errors.Is(err, ErrGrantInvalid) {
+	if _, _, err := TakeExecGrant(plain, "user-a", "login-a", "page-a"); !errors.Is(err, ErrGrantInvalid) {
 		t.Fatalf("reused exec grant error = %v", err)
 	}
 }
@@ -144,7 +147,7 @@ func TestConcurrentTakeExecGrant(t *testing.T) {
 	for i := range results {
 		go func(i int) {
 			defer wg.Done()
-			_, results[i] = TakeExecGrant(plain, "user-a", "login-a", "page-a")
+			_, _, results[i] = TakeExecGrant(plain, "user-a", "login-a", "page-a")
 		}(i)
 	}
 	wg.Wait()
@@ -161,16 +164,175 @@ func TestConcurrentTakeExecGrant(t *testing.T) {
 
 func TestRotateExecGrantKeepsAbsoluteExpiry(t *testing.T) {
 	ResetForTest()
-	expires := time.Now().Add(3 * time.Minute)
-	next, gotExpires, err := RotateExecGrant("user-a", "login-a", "page-a", expires)
+	plain, expires, err := IssueGrant("user-a", "login-a", ScopeExec, "page-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotExpires, epoch, err := TakeExecGrant(plain, "user-a", "login-a", "page-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, rotatedExpires, err := RotateExecGrant("user-a", "login-a", "page-a", gotExpires, epoch)
 	if err != nil || next == "" {
 		t.Fatal(err)
 	}
-	if !gotExpires.Equal(expires) {
-		t.Fatalf("rotated expiry = %v, want %v", gotExpires, expires)
+	if !rotatedExpires.Equal(expires) {
+		t.Fatalf("rotated expiry = %v, want %v", rotatedExpires, expires)
 	}
-	if _, err := TakeExecGrant(next, "user-a", "login-a", "page-a"); err != nil {
+	if _, _, err := TakeExecGrant(next, "user-a", "login-a", "page-a"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRotateBeforeRevokeIsClearedAndStaleEpochCannotIssue(t *testing.T) {
+	ResetForTest()
+	const user = "rotate-epoch-user"
+	plain, expires, err := IssueGrant(user, "login-a", ScopeExec, "page-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotExpires, epoch, err := TakeExecGrant(plain, user, "login-a", "page-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, rotatedExpires, err := RotateExecGrant(user, "login-a", "page-a", gotExpires, epoch)
+	if err != nil || next == "" {
+		t.Fatal(err)
+	}
+	if !rotatedExpires.Equal(expires) {
+		t.Fatalf("expiry = %v, want %v", rotatedExpires, expires)
+	}
+	RevokeUser(user)
+	if _, _, err := TakeExecGrant(next, user, "login-a", "page-a"); err == nil {
+		t.Fatal("grant rotated before revoke was still usable")
+	}
+	accounts.AdvanceUserSecurityEpochForTest(user)
+	issued, _, err := RotateExecGrant(user, "login-a", "page-a", expires, epoch)
+	if err == nil || issued != "" {
+		t.Fatalf("stale epoch issued %q err=%v", issued, err)
+	}
+	freshPlain, freshExpires, err := IssueGrant(user, "login-a", ScopeExec, "page-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	takenExpires, freshEpoch, err := TakeExecGrant(freshPlain, user, "login-a", "page-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, againExpires, err := RotateExecGrant(user, "login-a", "page-a", takenExpires, freshEpoch)
+	if err != nil || again == "" {
+		t.Fatal(err)
+	}
+	if !againExpires.Equal(freshExpires) {
+		t.Fatalf("fresh rotation expiry = %v, want %v", againExpires, freshExpires)
+	}
+}
+
+func TestRevokeWaitsForRotateCriticalSection(t *testing.T) {
+	ResetForTest()
+	const user = "rotate-lock-user"
+	plain, _, err := IssueGrant(user, "login-a", ScopeExec, "page-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expires, epoch, err := TakeExecGrant(plain, user, "login-a", "page-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	var revokeDone atomic.Bool
+	var revokeWaited atomic.Bool
+	rotateGrantHook = func() {
+		accounts.AdvanceUserSecurityEpochForTest(user)
+		started := make(chan struct{})
+		go func() {
+			close(started)
+			RevokeUser(user)
+			revokeDone.Store(true)
+		}()
+		<-started
+		select {
+		case <-time.After(40 * time.Millisecond):
+		case <-release:
+		}
+		revokeWaited.Store(!revokeDone.Load())
+	}
+	defer func() { rotateGrantHook = nil }()
+	issued, _, err := RotateExecGrant(user, "login-a", "page-a", expires, epoch)
+	close(release)
+	if err == nil || issued != "" {
+		t.Fatalf("epoch bump inside the grant lock still issued %q", issued)
+	}
+	if !revokeWaited.Load() {
+		t.Fatal("revoke finished while rotate still held the grant lock")
+	}
+	deadline := time.Now().Add(time.Second)
+	for !revokeDone.Load() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !revokeDone.Load() {
+		t.Fatal("revoke did not finish after rotate released the grant lock")
+	}
+}
+
+func TestOldGrantAfterEpochBumpCannotBeConsumedOrRotated(t *testing.T) {
+	ResetForTest()
+	const user = "old-grant-epoch"
+	const session = "login-a"
+	const page = "page-a"
+	epoch := accounts.UserSecurityEpoch(user)
+	plain, expires, err := IssueGrant(user, session, ScopeExec, page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remotePlain, _, err := IssueGrant(user, session, ScopeRemote, page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accounts.AdvanceUserSecurityEpochForTest(user)
+	if _, _, err := TakeExecGrant(plain, user, session, page); !errors.Is(err, ErrGrantInvalid) {
+		t.Fatalf("old exec grant consumed after epoch bump: %v", err)
+	}
+	if err := consumeGrant(remotePlain, user, session, ScopeRemote, page); !errors.Is(err, ErrGrantInvalid) {
+		t.Fatalf("old remote grant consumed after epoch bump: %v", err)
+	}
+	current := accounts.UserSecurityEpoch(user)
+	if current == epoch {
+		t.Fatal("epoch did not move")
+	}
+	for _, candidate := range []uint64{epoch, current} {
+		issued, _, err := RotateExecGrant(user, session, page, expires, candidate)
+		if err == nil || issued != "" {
+			t.Fatalf("late rotate at epoch %d issued %q err=%v", candidate, issued, err)
+		}
+	}
+	next, nextExpires, err := IssueGrant(user, session, ScopeExec, page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	takenExpires, takenEpoch, err := TakeExecGrant(next, user, session, page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if takenEpoch != current {
+		t.Fatalf("new grant epoch = %d, want %d", takenEpoch, current)
+	}
+	rotated, rotatedExpires, err := RotateExecGrant(user, session, page, takenExpires, takenEpoch)
+	if err != nil || rotated == "" {
+		t.Fatal(err)
+	}
+	if !rotatedExpires.Equal(nextExpires) {
+		t.Fatalf("new confirmation expiry = %v, want %v", rotatedExpires, nextExpires)
+	}
+}
+
+func TestIssueGrantAtEpochRejectsAfterBump(t *testing.T) {
+	ResetForTest()
+	const user = "issue-epoch-user"
+	epoch := accounts.UserSecurityEpoch(user)
+	accounts.AdvanceUserSecurityEpochForTest(user)
+	if _, _, err := IssueGrantAtEpoch(user, "login-a", ScopeExec, "page-a", epoch); !errors.Is(err, ErrGrantInvalid) {
+		t.Fatalf("stale confirmation issued a grant: %v", err)
 	}
 }
 

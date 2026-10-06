@@ -145,6 +145,12 @@ func TestAdminEditSettingsCancelsQueuedExecWhenRemoteTurnsOff(t *testing.T) {
 	if !strings.Contains(fn, "未能写入已取消任务结果") {
 		t.Fatal("disabling remote management still swallows cancel persist errors")
 	}
+	if !strings.Contains(fn, "scheduledexec.StopForRemoteOff(") {
+		t.Fatal("disabling remote management does not stop scheduled exec")
+	}
+	if !strings.Contains(fn, "未能停用定时任务") {
+		t.Fatal("disabling remote management swallows scheduled exec stop errors")
+	}
 	if !strings.Contains(fn, "settingsRequireHumanSession") || !strings.Contains(fn, "denyAPIKey") {
 		t.Fatal("custom HTML and theme settings must require a human session")
 	}
@@ -190,6 +196,39 @@ func TestCancelUndeliveredRemoteExecReturnsPersistError(t *testing.T) {
 	}})
 	if err == nil {
 		t.Fatal("cancel persist error was swallowed")
+	}
+}
+
+func TestCancelUndeliveredRemoteExecLeavesHandedOffUnfinished(t *testing.T) {
+	previous := cancelUndeliveredTaskResult
+	t.Cleanup(func() { cancelUndeliveredTaskResult = previous })
+	var wrote []string
+	cancelUndeliveredTaskResult = func(taskId, clientId, result string) error {
+		wrote = append(wrote, taskId+"/"+clientId+"/"+result)
+		return nil
+	}
+	err := cancelUndeliveredRemoteExec([]agent.RemovedV2Event{
+		{
+			UUID: "node-handed",
+			Event: v2.Event{
+				Method:    v2.MethodAgentExec,
+				HandedOff: true,
+				Params:    v2.ExecParams{TaskID: "task-handed", Command: "true"},
+			},
+		},
+		{
+			UUID: "node-waiting",
+			Event: v2.Event{
+				Method: v2.MethodAgentExec,
+				Params: v2.ExecParams{TaskID: "task-waiting", Command: "true"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wrote) != 1 || wrote[0] != "task-waiting/node-waiting/"+v2.RemoteManagementClosedTaskResult {
+		t.Fatalf("cancel writes = %#v", wrote)
 	}
 }
 

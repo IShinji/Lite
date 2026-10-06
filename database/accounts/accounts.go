@@ -19,7 +19,30 @@ var OnUserSecurityChanged func(userUUID string)
 var (
 	userSecurityMu        sync.Mutex
 	userSecurityListeners []func(string)
+	securityEpochMu       sync.Mutex
+	securityEpoch         = map[string]uint64{}
 )
+
+// UserSecurityEpoch increases once per password or two-factor change, before
+// those listeners run. A save can capture the value and refuse to leave an
+// enabled task when the value moves.
+func UserSecurityEpoch(userUUID string) uint64 {
+	securityEpochMu.Lock()
+	defer securityEpochMu.Unlock()
+	return securityEpoch[userUUID]
+}
+
+func bumpUserSecurityEpoch(userUUID string) {
+	securityEpochMu.Lock()
+	securityEpoch[userUUID]++
+	securityEpochMu.Unlock()
+}
+
+// AdvanceUserSecurityEpochForTest moves one user's credential generation
+// without running security listeners.
+func AdvanceUserSecurityEpochForTest(userUUID string) {
+	bumpUserSecurityEpoch(userUUID)
+}
 
 // AddUserSecurityListener registers a password/2FA change handler. Listeners
 // run in registration order; a later module cannot replace an earlier one.
@@ -33,6 +56,7 @@ func AddUserSecurityListener(fn func(string)) {
 }
 
 func notifyUserSecurityChanged(uuid string) {
+	bumpUserSecurityEpoch(uuid)
 	userSecurityMu.Lock()
 	listeners := append([]func(string){}, userSecurityListeners...)
 	legacy := OnUserSecurityChanged

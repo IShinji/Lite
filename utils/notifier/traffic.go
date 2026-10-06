@@ -69,6 +69,9 @@ func currentTrafficUsage(client models.Client, up, down int64, now time.Time) tr
 // CheckTraffic 检查各客户端流量使用情况。用量达到起始比例时提醒一次，之后每增加一个提醒幅度再提醒一次；满额时再提醒一次。
 // 由外部协程每分钟调用一次
 func CheckTraffic() {
+	if err := clients.PersistTrafficDisplayFields(); err != nil {
+		logger.Error("notifier", "failed to persist traffic cycle display fields", "error", err)
+	}
 	// 获取最新上报与客户端配置
 	reports := agent_runtime.GetLatestReport()
 	if len(reports) == 0 {

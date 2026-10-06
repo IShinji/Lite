@@ -119,7 +119,7 @@ func SendEvent(event models.EventMessage) error {
 	if len(channels) == 0 {
 		return nil
 	}
-	if digestOn, window := digestFrom(cfg); digestOn {
+	if digestOn, window := digestFrom(cfg); digestOn && digestibleKind(event.Kind) {
 		// Return before the window closes. A caller that sends servers one
 		// after another, such as the load alert loop, must join the same batch.
 		enqueueDigest(event, window)

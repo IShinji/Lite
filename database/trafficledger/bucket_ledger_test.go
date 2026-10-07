@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-
 func TestBucketStartAlignsTo15Minutes(t *testing.T) {
 	tm := time.Date(2026, 7, 1, 10, 44, 59, 0, time.UTC)
 	assert.Equal(t, time.Date(2026, 7, 1, 10, 30, 0, 0, time.UTC).Unix(), BucketStart(tm))

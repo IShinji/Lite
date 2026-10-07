@@ -69,6 +69,10 @@ func DeploymentType() string {
 func DetectCapability() Capability {
 	deployment := DeploymentType()
 	result := Capability{Deployment: deployment}
+	if localPatchMarker != "" {
+		result.Reason = reasonLocalPatch
+		return result
+	}
 	result.Distribution, result.DistributionVersion = linuxDistribution()
 	if deployment != DeploymentLinux || runtime.GOOS != "linux" {
 		result.Reason = "not_managed_linux"

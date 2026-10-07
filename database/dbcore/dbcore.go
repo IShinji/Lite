@@ -1059,6 +1059,7 @@ func doInitialize() error {
 		&models.OfflineNotification{},
 		&models.TrafficReportNotification{},
 		&models.TrafficDailyLedger{},
+		&models.TrafficBucketLedger{},
 		&models.TrafficCycleFirstDay{},
 		&models.TrafficCalibrationAdjustment{},
 		&models.PingTask{},
@@ -1225,6 +1226,7 @@ func cleanupOrphanedClientData(db *gorm.DB) error {
 			"offline notifications":           &models.OfflineNotification{},
 			"traffic report notifications":    &models.TrafficReportNotification{},
 			"traffic daily ledger":            &models.TrafficDailyLedger{},
+			"traffic bucket ledger":           &models.TrafficBucketLedger{},
 			"traffic cycle first days":        &models.TrafficCycleFirstDay{},
 			"traffic calibration adjustments": &models.TrafficCalibrationAdjustment{},
 		} {

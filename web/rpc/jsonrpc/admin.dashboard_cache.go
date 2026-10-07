@@ -287,7 +287,7 @@ func buildDashboardChartsCached(ctx context.Context, now time.Time, sections das
 
 	if sections&dashboardChartTraffic != 0 {
 		g.Go(func() error {
-			value, loadErr := dashboardTrafficModuleCache.get(gctx, now, key, cacheTTL,
+			value, loadErr := dashboardTrafficModuleCache.get(gctx, now, key+dashboardTZCacheSuffix(gctx), cacheTTL,
 				func() (dashboardTrafficSummary, error) {
 					return loadDashboardTraffic(gctx, clientList, now, rankingLimit)
 				})

@@ -72,6 +72,9 @@ func loadCachedDashboardTodayTraffic(day string, now time.Time) ([]dashboardTraf
 func adminGetDashboardTrafficDay(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	rawDay, _ := rpc.GetParamAs[string](req, "day")
 	now := time.Now().UTC()
+	if tz := dashboardTZFromRequest(req); !tz.legacy() { // local patch
+		return adminGetDashboardTrafficDayTZ(ctx, dbcore.GetDBInstance(), rawDay, tz, now)
+	}
 	day, err := parseDashboardTrafficDay(rawDay, now)
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
@@ -88,6 +91,7 @@ func adminGetDashboardTrafficDay(ctx context.Context, req *rpc.JsonRpcRequest) (
 		Day:         day.Format(time.DateOnly),
 		Items:       items,
 		GeneratedAt: now,
+		TZ:          dashboardTZFromRequest(req).echo(),
 	}, nil
 }
 

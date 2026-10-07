@@ -38,6 +38,9 @@ type dashboardTrafficDay struct {
 	Up       int64  `json:"up"`
 	Down     int64  `json:"down"`
 	Billable int64  `json:"billable"`
+	// Partial (local patch): the bucket ledger does not fully cover this day in
+	// the requested time zone; values are what is known. See admin.dashboard_tz.go.
+	Partial bool `json:"partial,omitempty"`
 }
 
 type dashboardTrafficHour struct {
@@ -74,6 +77,8 @@ type dashboardTrafficSummary struct {
 	Daily                []dashboardTrafficDay      `json:"daily"`
 	Ranking              []dashboardTrafficRankItem `json:"ranking"`
 	HistoryReady         bool                       `json:"history_ready"`
+	HistoryComplete      *bool                      `json:"history_complete,omitempty"`
+	LedgerSince          *string                    `json:"ledger_since,omitempty"`
 	Error                string                     `json:"error,omitempty"`
 }
 
@@ -81,6 +86,8 @@ type dashboardTrafficDayResponse struct {
 	Day         string                     `json:"day"`
 	Items       []dashboardTrafficRankItem `json:"items"`
 	GeneratedAt time.Time                  `json:"generated_at"`
+	TZ          string                     `json:"tz,omitempty"`
+	Partial     bool                       `json:"partial,omitempty"`
 }
 
 type dashboardStorageSummary struct {
@@ -120,6 +127,7 @@ type dashboardResponse struct {
 	ReturnRoute dashboardReturnRouteSummary `json:"return_route"`
 	Alerts      dashboardAlertSummaries     `json:"alerts"`
 	GeneratedAt time.Time                   `json:"generated_at"`
+	TZ          string                      `json:"tz,omitempty"`
 }
 
 type dashboardSummarySections uint8
@@ -149,6 +157,7 @@ type dashboardChartsResponse struct {
 	Latency     dashboardLatencySummary    `json:"latency"`
 	PacketLoss  dashboardPacketLossSummary `json:"packet_loss"`
 	GeneratedAt time.Time                  `json:"generated_at"`
+	TZ          string                     `json:"tz,omitempty"`
 }
 
 func init() {
@@ -187,14 +196,20 @@ func adminGetDashboard(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, err.Error(), nil)
 	}
-	return decorateDashboardSummaryNavigation(value), nil
+	result := decorateDashboardSummaryNavigation(value)
+	result.TZ = dashboardTZFromRequest(req).echo() // local patch: summary holds no day-bucketed traffic
+	return result, nil
 }
 
 func adminGetDashboardCharts(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	now := time.Now().UTC()
 	sections, rankingLimit := parseDashboardChartRequest(req)
 	settings := loadDashboardSettings()
-	return decorateDashboardNavigation(buildDashboardChartsCached(ctx, now, sections, rankingLimit, time.Duration(settings.ChartRefreshSeconds)*time.Second)), nil
+	tz := dashboardTZFromRequest(req)
+	ctx = withDashboardTZ(ctx, tz) // local patch
+	result := decorateDashboardNavigation(buildDashboardChartsCached(ctx, now, sections, rankingLimit, time.Duration(settings.ChartRefreshSeconds)*time.Second))
+	result.TZ = tz.echo()
+	return result, nil
 }
 
 func adminGetClientTrafficDaily(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
@@ -213,18 +228,21 @@ func adminGetClientTrafficDaily(ctx context.Context, req *rpc.JsonRpcRequest) (a
 		return nil, rpc.MakeError(rpc.InvalidParams, "client not found", nil)
 	}
 	client := list[0]
-	summary, err := loadDashboardTraffic(ctx, list, time.Now().UTC(), 1)
+	tz := dashboardTZFromRequest(req)
+	summary, err := loadDashboardTraffic(withDashboardTZ(ctx, tz), list, time.Now().UTC(), 1)
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, err.Error(), nil)
 	}
-	return map[string]any{
+	result := map[string]any{
 		"daily":              summary.Daily,
 		"today_up":           summary.TodayUp,
 		"today_down":         summary.TodayDown,
 		"today_billable":     summary.TodayBillable,
 		"history_ready":      summary.HistoryReady,
 		"traffic_limit_type": client.TrafficLimitType,
-	}, nil
+	}
+	addDashboardTZFields(result, tz, summary) // local patch: tz / history_complete / ledger_since
+	return result, nil
 }
 
 func dashboardChartNeedsPingTasks(sections dashboardChartSections) bool {
@@ -467,6 +485,9 @@ func buildDashboardServers(clientList []models.Client) dashboardServerSummary {
 }
 
 func loadDashboardTraffic(ctx context.Context, clientList []models.Client, now time.Time, rankingLimit int) (dashboardTrafficSummary, error) {
+	if tz := dashboardTZFromContext(ctx); !tz.legacy() { // local patch
+		return loadDashboardTrafficTZ(ctx, clientList, now, rankingLimit, tz)
+	}
 	today := trafficledger.BeijingDay(now)
 	start := today.AddDate(0, 0, -(trafficledger.DashboardHistoryDays - 1))
 	db := dbcore.GetDBInstance()

@@ -77,10 +77,10 @@ func registerAgentRoutes(r *gin.Engine) {
 // registerAdminRoutes 管理员路由。除二进制/流类外全部经 Bind 绑定到 admin: 命名空间方法。
 func registerAdminRoutes(r *gin.Engine) {
 	g := r.Group("/api/admin", api.RequireRole(api.RoleAdmin))
-	g.GET("/dashboard", jsonRpc.Bind("admin:getDashboard", jsonRpc.WithQuery("sections", "limit"), jsonRpc.WithRaw()))
-	g.GET("/dashboard/charts", jsonRpc.Bind("admin:getDashboardCharts", jsonRpc.WithQuery("sections", "limit"), jsonRpc.WithRaw()))
+	g.GET("/dashboard", jsonRpc.Bind("admin:getDashboard", jsonRpc.WithQuery("sections", "limit", "tz"), jsonRpc.WithRaw()))
+	g.GET("/dashboard/charts", jsonRpc.Bind("admin:getDashboardCharts", jsonRpc.WithQuery("sections", "limit", "tz"), jsonRpc.WithRaw()))
 	g.GET("/dashboard/alerts", jsonRpc.Bind("admin:getDashboardAlertItems", jsonRpc.WithQuery("kind"), jsonRpc.WithRaw()))
-	g.GET("/dashboard/traffic-day", jsonRpc.Bind("admin:getDashboardTrafficDay", jsonRpc.WithQuery("day"), jsonRpc.WithRaw()))
+	g.GET("/dashboard/traffic-day", jsonRpc.Bind("admin:getDashboardTrafficDay", jsonRpc.WithQuery("day", "tz"), jsonRpc.WithRaw()))
 	billingGroup := g.Group("/billing")
 	{
 		billingGroup.GET("/overview", jsonRpc.Bind("admin:getBillingOverview", jsonRpc.WithQuery("currency")))
@@ -231,7 +231,7 @@ func registerAdminRoutes(r *gin.Engine) {
 		clientGroup.POST("/:uuid/deployment-profile", jsonRpc.Bind("admin:saveClientDeploymentProfile", jsonRpc.WithPath("uuid"), jsonRpc.WithRaw()))
 		clientGroup.GET("/:uuid/traffic-calibration", admin.GetTrafficCalibration)
 		clientGroup.POST("/:uuid/traffic-calibration", admin.UpdateTrafficCalibration)
-		clientGroup.GET("/:uuid/traffic-daily", jsonRpc.Bind("admin:getClientTrafficDaily", jsonRpc.WithPath("uuid"), jsonRpc.WithRaw()))
+		clientGroup.GET("/:uuid/traffic-daily", jsonRpc.Bind("admin:getClientTrafficDaily", jsonRpc.WithPath("uuid"), jsonRpc.WithQuery("tz"), jsonRpc.WithRaw()))
 		clientGroup.POST("/token/rotate", api.RejectAPIKey(), api.RequireSensitive2FA(), jsonRpc.Bind("admin:rotateClientToken"))
 		clientGroup.POST("/order", jsonRpc.Bind("admin:orderClients"))
 	}

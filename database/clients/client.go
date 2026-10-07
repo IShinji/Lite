@@ -101,6 +101,7 @@ func deleteClient(db *gorm.DB, clientUuid string) (bool, error) {
 			"offline notifications":           &models.OfflineNotification{},
 			"traffic report notifications":    &models.TrafficReportNotification{},
 			"traffic daily ledger":            &models.TrafficDailyLedger{},
+			"traffic bucket ledger":           &models.TrafficBucketLedger{},
 			"traffic cycle first days":        &models.TrafficCycleFirstDay{},
 			"traffic calibration adjustments": &models.TrafficCalibrationAdjustment{},
 			"ping loss notifications":         &models.PingLossNotification{},

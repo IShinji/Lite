@@ -277,7 +277,8 @@ func maintainWithDailyCalculator(ctx context.Context, db *gorm.DB, now time.Time
 	} else if err := db.WithContext(ctx).Where("client NOT IN ?", clientIDs).Delete(&models.TrafficDailyLedger{}).Error; err != nil {
 		return fmt.Errorf("clean disabled traffic ledger rows: %w", err)
 	}
-	return nil
+	// Local patch: settle the 15 minute bucket ledger (see bucket_ledger.go).
+	return maintainBucketLedger(ctx, db, clientIDs, today)
 }
 
 // BillableUsage applies the same traffic accounting rule used by limits and

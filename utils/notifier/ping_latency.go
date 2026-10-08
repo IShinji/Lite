@@ -89,7 +89,18 @@ func latencyWindowCovered(stats metricstore.PingHealthStats, windowStart, now ti
 }
 
 func latencyAverageInside(stats metricstore.PingHealthStats, low, high float64) bool {
-	return stats.HasLatency && stats.AverageLatencyMS > low && stats.AverageLatencyMS < high
+	if !stats.HasLatency || stats.AverageLatencyMS >= high {
+		return false
+	}
+	// A measured 0 ms RTT is normal on an intranet. It is not below the floor.
+	if stats.AverageLatencyMS == 0 {
+		return true
+	}
+	return stats.AverageLatencyMS > low
+}
+
+func latencyBelowFloor(average, low float64) bool {
+	return average > 0 && average <= low
 }
 
 func latencyFullyRecovered(stats metricstore.PingHealthStats, windowStart, now time.Time, notification models.PingLossNotification, pingIntervalSeconds int, low, high float64) bool {
@@ -161,7 +172,7 @@ func evaluateLatencyAnomaly(
 				next.AdaptiveBaselineStatus = models.AdaptiveBaselineFrozen
 				next.AdaptiveBaselineResumeAt = nil
 			}
-		} else if stats.AverageLatencyMS <= low {
+		} else if latencyBelowFloor(stats.AverageLatencyMS, low) {
 			action = pingLatencyNotificationAlertLow
 			next.LatencyAlertState = models.LatencyAlertLow
 			next.LatencyIncidentNotified = false
@@ -173,7 +184,7 @@ func evaluateLatencyAnomaly(
 			}
 		}
 	case models.LatencyAlertHigh:
-		if stats.AverageLatencyMS <= low {
+		if latencyBelowFloor(stats.AverageLatencyMS, low) {
 			action = pingLatencyNotificationFlipLow
 			next.LatencyAlertState = models.LatencyAlertLow
 			next.LatencyIncidentNotified = false
@@ -214,7 +225,7 @@ func evaluateLatencyAnomaly(
 			}
 			applyLatencyRecovery(&next, now)
 			next.LatencyIncidentNotified = false
-		} else if stats.AverageLatencyMS <= low && latencyCooldownElapsed(next, now) {
+		} else if latencyBelowFloor(stats.AverageLatencyMS, low) && latencyCooldownElapsed(next, now) {
 			action = pingLatencyNotificationPersist
 			if next.LatencyLastNotified == nil {
 				action = pingLatencyNotificationAlertLow

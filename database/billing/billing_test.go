@@ -1103,6 +1103,23 @@ func TestRemainingByClientKeepsNativeCurrencyAndSkipsNonRecurring(t *testing.T) 
 	}
 	require.NotEmpty(t, want)
 	assert.Equal(t, want, got["usd-node"].Value)
+
+	var freeRow, oneTimeRow BillingServerRow
+	for _, row := range page.Items {
+		switch row.Client {
+		case "free":
+			freeRow = row
+		case "one-time":
+			oneTimeRow = row
+		}
+	}
+	assert.Equal(t, "free", freeRow.BillingStatus)
+	assert.Nil(t, freeRow.RemainingValue)
+	require.NotNil(t, freeRow.RemainingDays)
+	assert.Equal(t, 30, *freeRow.RemainingDays)
+	assert.Nil(t, oneTimeRow.RemainingValue)
+	require.NotNil(t, oneTimeRow.RemainingDays)
+	assert.Equal(t, 30, *oneTimeRow.RemainingDays)
 }
 
 func TestRemainingDaysUsesCeilSoSubDayStillCounts(t *testing.T) {

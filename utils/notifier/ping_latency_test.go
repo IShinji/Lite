@@ -74,6 +74,18 @@ func TestEvaluateFixedLatencyThresholds(t *testing.T) {
 	low := evaluateLatencyAnomaly(rule, coveredLatencyStats(120, 105, 150, 18, windowStart, now), metricstore.PingBaselineCandidate{}, windowStart, now, 0)
 	assert.Equal(t, pingLatencyNotificationAlertLow, low.Action)
 
+	zero := evaluateLatencyAnomaly(rule, coveredLatencyStats(0, 0, 0, 18, windowStart, now), metricstore.PingBaselineCandidate{}, windowStart, now, 0)
+	assert.Equal(t, pingLatencyNotificationNone, zero.Action)
+	assert.Equal(t, models.LatencyAlertNormal, zero.Notification.LatencyAlertState)
+
+	rule.LatencyAlertState = models.LatencyAlertLow
+	rule.LatencyIncidentNotified = true
+	cleared := evaluateLatencyAnomaly(rule, coveredLatencyStats(0, 0, 0, 18, windowStart, now), metricstore.PingBaselineCandidate{}, windowStart, now, 0)
+	assert.Equal(t, pingLatencyNotificationRecovery, cleared.Action)
+	assert.Equal(t, models.LatencyAlertNormal, cleared.Notification.LatencyAlertState)
+	rule.LatencyAlertState = models.LatencyAlertNormal
+	rule.LatencyIncidentNotified = false
+
 	spike := evaluateLatencyAnomaly(rule, coveredLatencyStats(160, 145, 210, 18, windowStart, now), metricstore.PingBaselineCandidate{}, windowStart, now, 0)
 	assert.Equal(t, pingLatencyNotificationNone, spike.Action)
 

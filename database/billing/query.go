@@ -458,6 +458,9 @@ func GetServers(ctx context.Context, db *gorm.DB, query ServerQuery) (ServerPage
 		row.MonthBase = FormatAmountMicros(base)
 		row.MonthExtra = FormatAmountMicros(extra + other + oneTime)
 		row.MonthTotal = FormatAmountMicros(base + extra + other + oneTime)
+		// Free and one-time servers still have an expiry. Only residual value
+		// stays limited to recurring prices.
+		row.RemainingDays = finiteRemainingDays(version.ExpiredAt, query.Now)
 		if row.BillingStatus == "recurring" && version.CurrencyValid {
 			dailyNative, monthlyNative, yearlyNative, calcErr := cycleAverageMicros(version)
 			if calcErr != nil {
@@ -466,7 +469,8 @@ func GetServers(ctx context.Context, db *gorm.DB, query ServerQuery) (ServerPage
 			row.DailyAverage = convertedLockedForecast(dailyNative, version, currency, lockedRates)
 			row.MonthlyAverage = convertedLockedForecast(monthlyNative, version, currency, lockedRates)
 			row.YearlyAverage = convertedLockedForecast(yearlyNative, version, currency, lockedRates)
-			row.RemainingValue, row.RemainingDays = remainingValue(version, currency, latestRates, query.Now)
+			value, _ := remainingValue(version, currency, latestRates, query.Now)
+			row.RemainingValue = value
 		}
 		rows = append(rows, row)
 	}
@@ -1262,6 +1266,14 @@ func isLongTermExpiry(expiredAt *time.Time) bool {
 	return expiry.IsLongTerm(expiredAt)
 }
 
+func finiteRemainingDays(expiredAt *time.Time, now time.Time) *int {
+	if expiredAt == nil || isLongTermExpiry(expiredAt) {
+		return nil
+	}
+	days := expiry.RemainingDaysCeil(*expiredAt, now)
+	return &days
+}
+
 func remainingValue(version models.BillingPriceVersion, currency string, rates map[string]string, now time.Time) (*string, *int) {
 	if version.ExpiredAt == nil || version.PriceMicros <= 0 || version.BillingCycleDays <= 0 {
 		return nil, nil
@@ -1333,13 +1345,14 @@ func remainingValueSummary(ctx context.Context, db *gorm.DB, currency string, no
 		if _, ok := liveSet[version.Client]; !ok {
 			continue
 		}
-		value, days := remainingValue(version, currency, rates, now)
+		value, _ := remainingValue(version, currency, rates, now)
 		if value != nil {
 			amount, parseErr := ParseAmountMicros(*value)
 			if parseErr == nil {
 				total += amount
 			}
 		}
+		days := finiteRemainingDays(version.ExpiredAt, now)
 		if days != nil && version.ExpiredAt != nil && version.ExpiredAt.After(now) && !version.ExpiredAt.After(now.AddDate(0, 0, 30)) {
 			expiring++
 		}

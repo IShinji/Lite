@@ -94,3 +94,69 @@ func TestPublicPingStatsFromAggregateGroupsKeepsZeroLatencyWithValidSamples(t *t
 		}
 	}
 }
+
+// With partial loss the store reports a bucket of only failures as Value 0 with
+// Count equal to the number of failed probes, and a half-failed bucket averages
+// only its valid probes but keeps Count at the total. Latency stats must be
+// weighted by valid samples, otherwise those zeros drag avg/min/p50 down.
+func TestPublicPingStatsFromAggregateGroupsPartialLossIgnoresFailedSamples(t *testing.T) {
+	base := time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)
+	bucket := func(i int) time.Time { return base.Add(time.Duration(i) * time.Minute) }
+	series := func(v0, v1, v2, v3 float64) map[string][]metric.AggregatePoint {
+		return map[string][]metric.AggregatePoint{"1": {
+			{Bucket: bucket(0), Count: 1, Value: v0},
+			{Bucket: bucket(1), Count: 1, Value: v1}, // every probe failed -> stored as 0
+			{Bucket: bucket(2), Count: 1, Value: v2},
+			{Bucket: bucket(3), Count: 4, Value: v3}, // 2 valid + 2 failed
+		}}
+	}
+	loss := map[string][]metric.AggregatePoint{"1": {
+		{Bucket: bucket(0), Count: 1, Value: 0},
+		{Bucket: bucket(1), Count: 1, Value: 1},
+		{Bucket: bucket(2), Count: 1, Value: 0},
+		{Bucket: bucket(3), Count: 4, Value: 0.5},
+	}}
+	taskMap := map[string]models.PingTask{
+		"1": {Id: 1, Name: "Seattle ICMP", Clients: models.StringArray{"node-a"}, Type: "icmp", Interval: 60},
+	}
+	groups := publicPingMetricAggregateGroups{
+		Avg:           series(200, 0, 220, 100),
+		Min:           series(200, 0, 220, 80),
+		Max:           series(200, 0, 220, 120),
+		Last:          series(200, -1, 220, 90),
+		P50:           series(200, 0, 220, 100),
+		P99:           series(200, 0, 220, 120),
+		StdDev:        series(0, 0, 0, 20),
+		Loss:          loss,
+		LossAvailable: true,
+	}
+	stats := publicPingStatsFromAggregateGroups("node-a", groups, taskMap, nil)
+	if len(stats) != 1 {
+		t.Fatalf("expected one stat, got %#v", stats)
+	}
+	got := stats[0]
+	if got.Total != 7 || got.Valid != 4 {
+		t.Fatalf("expected total=7 valid=4, got total=%d valid=%d", got.Total, got.Valid)
+	}
+	want := map[string]float64{
+		"avg": 155, // (200*1 + 220*1 + 100*2) / 4, not (200+0+220+400)/7
+		"p50": 155,
+		"p99": 165, // (200 + 220 + 120*2) / 4
+		"min": 80,  // the failed bucket's 0 must not become the minimum
+		"max": 220,
+	}
+	have := map[string]*float64{"avg": got.Avg, "p50": got.P50, "p99": got.P99, "min": got.Min, "max": got.Max}
+	for name, w := range want {
+		g := have[name]
+		if g == nil {
+			t.Errorf("%s is nil, want %v", name, w)
+		} else if *g < w-0.001 || *g > w+0.001 {
+			t.Errorf("%s = %v, want %v", name, *g, w)
+		}
+	}
+	if got.Latest == nil {
+		t.Errorf("latest is nil, want 90 (the newest successful bucket)")
+	} else if *got.Latest != 90 {
+		t.Errorf("latest = %v, want 90 (the newest successful bucket)", *got.Latest)
+	}
+}

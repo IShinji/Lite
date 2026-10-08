@@ -812,6 +812,11 @@ func publicPingStatsFromAggregateGroups(entityID string, groups publicPingMetric
 		if latest == nil {
 			latest = latestPositiveAggregate(groups.Avg[taskID])
 		}
+		if valid <= 0 {
+			// Every probe failed. A bucket holding only failures is aggregated
+			// over zero valid samples and comes back as 0, which is not a latency.
+			avg, p50, p99, stddev, minimum, maximum, latest = nil, nil, nil, nil, nil, nil, nil
+		}
 
 		stat := publicPingMetricTaskStats{
 			EntityID:        entityID,
@@ -973,6 +978,8 @@ func positiveAggregateMax(points []metric.AggregatePoint) *float64 {
 	return out
 }
 
+// latestPositiveAggregate returns the newest non-negative bucket value. Zero is
+// kept because sub-millisecond latency can legitimately round to 0.
 func latestPositiveAggregate(points []metric.AggregatePoint) *float64 {
 	var out *float64
 	var latest time.Time

@@ -905,7 +905,7 @@ func GetTrafficRecordsByClientsAndTime(ctx context.Context, clientUUIDs []string
 		return []DashboardTrafficRecord{}, map[string]DashboardTrafficRecord{}, nil
 	}
 
-	now := time.Now().UTC()
+	now := trafficQueryNow().UTC()
 	interval := recordSeriesInterval(s, start, end, now, 500)
 	recordMap := make(map[recordSeriesKey]DashboardTrafficRecord, len(requested)*recordClientMaxPoints(500))
 	trafficMetrics := []string{MetricNetTotalUp, MetricNetTotalDown, MetricTrafficUp, MetricTrafficDown}
@@ -1103,7 +1103,7 @@ type recordSeriesKey struct {
 }
 
 func getRecordsByClientAndTimeFromSeries(ctx context.Context, s *metric.Store, clientUUID string, start, end time.Time, metricNames []string, maxPoints int) ([]models.Record, error) {
-	now := time.Now().UTC()
+	now := trafficQueryNow().UTC()
 	interval := recordSeriesInterval(s, start, end, now, maxPoints)
 	recordMap := make(map[recordSeriesKey]*models.Record)
 	queries := make([]metric.AggregateQuery, 0, len(metricNames))

@@ -276,3 +276,34 @@ func TestDashboardWithoutTZUsesLegacyPath(t *testing.T) {
 	assert.Equal(t, "", dashboardTodayCacheKey(parseDashboardTZ(""), "d")[:0])
 	assert.Equal(t, "2026-07-10", dashboardTodayCacheKey(parseDashboardTZ(""), "2026-07-10"))
 }
+
+// The hourly maintenance also writes today's ended buckets into the bucket
+// ledger. Today (from Beijing midnight) is served from the live metric scan,
+// so those rows must not be counted a second time.
+func TestDashboardTZIgnoresIncrementalTodayBuckets(t *testing.T) {
+	db := openTZTestDB(t)
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	b0 := trafficledger.BeijingDay(now)
+	seedBuckets(t, db, b0.AddDate(0, 0, -33), b0)
+	var today []models.TrafficBucketLedger
+	for b := b0.Unix(); b < trafficledger.BucketStart(now); b += 900 {
+		today = append(today, models.TrafficBucketLedger{Client: "c1", BucketStart: b, UpBytes: 1, DownBytes: 2})
+	}
+	require.NoError(t, db.Create(&today).Error)
+	stubLiveFull(t)
+	for _, zone := range []string{"America/Los_Angeles", "UTC", "Pacific/Kiritimati"} {
+		data, summary := tzData(t, db, zone, now)
+		n := trafficledger.DashboardHistoryDays
+		for i := 0; i < n; i++ {
+			end := data.starts[i+1]
+			if end.After(now) {
+				// live buckets include the one in progress
+				end = time.Unix(trafficledger.BucketStart(now)+900, 0)
+			}
+			want := int64(end.Sub(data.starts[i]) / (15 * time.Minute))
+			assert.Equal(t, want, summary.Daily[i].Up, "%s day %s", zone, summary.Daily[i].Day)
+			assert.Equal(t, 2*want, summary.Daily[i].Down, "%s day %s", zone, summary.Daily[i].Day)
+		}
+		assert.Equal(t, summary.Daily[n-1].Up, summary.TodayUp, zone)
+	}
+}

@@ -278,7 +278,7 @@ func maintainWithDailyCalculator(ctx context.Context, db *gorm.DB, now time.Time
 		return fmt.Errorf("clean disabled traffic ledger rows: %w", err)
 	}
 	// Local patch: settle the 15 minute bucket ledger (see bucket_ledger.go).
-	return maintainBucketLedger(ctx, db, clientIDs, today)
+	return maintainBucketLedger(ctx, db, clientIDs, now)
 }
 
 // BillableUsage applies the same traffic accounting rule used by limits and

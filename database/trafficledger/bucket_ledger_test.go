@@ -42,14 +42,18 @@ func TestEnsureBucketRangeWritesFullDaysIdempotently(t *testing.T) {
 	require.NoError(t, db.AutoMigrate(&models.TrafficBucketLedger{}))
 	day := time.Date(2026, 7, 30, 0, 0, 0, 0, BeijingLocation)
 	calls := 0
-	calc := func(_ context.Context, _ string, start, _ time.Time) (BucketResult, error) {
+	calc := func(_ context.Context, _ string, start, end time.Time) (BucketResult, error) {
 		calls++
+		assert.LessOrEqual(t, end.Sub(start), 2*24*time.Hour)
 		return BucketResult{HasBaseline: true, Usage: map[int64]Usage{start.Unix() + 900: {Up: 5, Down: 7}}}, nil
 	}
+	resetBucketSkip("client-a")
 	end := day.AddDate(0, 0, 2)
 	require.NoError(t, ensureBucketRange(context.Background(), db, []string{"client-a"}, day, end, calc))
+	// One probe over the backlog, then each day in 6 hour pieces.
+	assert.Equal(t, 1+2*4, calls)
 	require.NoError(t, ensureBucketRange(context.Background(), db, []string{"client-a"}, day, end, calc))
-	assert.Equal(t, 1, calls, "settled days must not be rescanned")
+	assert.Equal(t, 1+2*4, calls, "settled days must not be rescanned")
 	var count int64
 	require.NoError(t, db.Model(&models.TrafficBucketLedger{}).Count(&count).Error)
 	assert.Equal(t, int64(2*BucketsPerBeijingDay), count)
@@ -63,24 +67,113 @@ func TestEnsureBucketRangeDoesNotFabricateDaysWithoutSource(t *testing.T) {
 	db := openLedgerTestDB(t, "bucket-ledger-nosource")
 	require.NoError(t, db.AutoMigrate(&models.TrafficBucketLedger{}))
 	day := time.Date(2026, 7, 1, 0, 0, 0, 0, BeijingLocation)
-	// No baseline: first retained record is on day 3, so only days 4.. are written.
+	// The first retained record is on day 3 and nothing was written while
+	// day 3 was in progress, so day 3 is incomplete and only days 4.. are
+	// written.
 	first := day.AddDate(0, 0, 3).Add(6 * time.Hour)
-	calc := func(_ context.Context, _ string, _, _ time.Time) (BucketResult, error) {
-		return BucketResult{HasBaseline: false, FirstRecord: first, Usage: map[int64]Usage{BucketStart(first): {Up: 1}}}, nil
+	calc := func(_ context.Context, _ string, start, end time.Time) (BucketResult, error) {
+		if !start.After(first) {
+			result := BucketResult{Usage: map[int64]Usage{}}
+			if first.Before(end) {
+				result.FirstRecord = first
+				result.Usage[BucketStart(first)] = Usage{Up: 1}
+			}
+			return result, nil
+		}
+		return BucketResult{HasBaseline: true, FirstRecord: start, Usage: map[int64]Usage{BucketStart(start): {Up: 1}}}, nil
 	}
-	delete(bucketSkipUntil, "client-a")
+	resetBucketSkip("client-a")
 	require.NoError(t, ensureBucketRange(context.Background(), db, []string{"client-a"}, day, day.AddDate(0, 0, 6), calc))
 	var minStart int64
 	require.NoError(t, db.Model(&models.TrafficBucketLedger{}).Select("MIN(bucket_start)").Scan(&minStart).Error)
 	assert.Equal(t, day.AddDate(0, 0, 4).Unix(), minStart)
+	var n int64
+	require.NoError(t, db.Model(&models.TrafficBucketLedger{}).Count(&n).Error)
+	assert.Equal(t, int64(2*BucketsPerBeijingDay), n)
+	// Days 0..3 are known to be unrecoverable now and are not read again.
+	assert.Equal(t, day.AddDate(0, 0, 4), bucketSkipUntil["client-a"])
 
 	// A client with no records at all gets nothing.
 	require.NoError(t, db.Create(&models.Client{UUID: "client-b", Token: "token-b"}).Error)
 	empty := func(_ context.Context, _ string, _, _ time.Time) (BucketResult, error) { return BucketResult{}, nil }
+	resetBucketSkip("client-b")
 	require.NoError(t, ensureBucketRange(context.Background(), db, []string{"client-b"}, day, day.AddDate(0, 0, 6), empty))
-	var n int64
 	require.NoError(t, db.Model(&models.TrafficBucketLedger{}).Where("client = ?", "client-b").Count(&n).Error)
 	assert.Zero(t, n)
+	// An empty read is not evidence that the days are unrecoverable.
+	_, skipped := bucketSkipUntil["client-b"]
+	assert.False(t, skipped)
+}
+
+// A day whose start aged out of the metric store (no baseline) but that has
+// incremental rows is settled without overwriting them: buckets up to the
+// first retained record are only inserted when missing, later ones replaced.
+func TestEnsureBucketRangeKeepsIncrementalRowsWithoutBaseline(t *testing.T) {
+	db := openLedgerTestDB(t, "bucket-ledger-incremental")
+	require.NoError(t, db.AutoMigrate(&models.TrafficBucketLedger{}))
+	day := time.Date(2026, 7, 1, 0, 0, 0, 0, BeijingLocation)
+	first := day.Add(time.Hour + 2*time.Minute)
+	require.NoError(t, db.Create(&[]models.TrafficBucketLedger{
+		{Client: "client-a", BucketStart: day.Unix(), UpBytes: 100, DownBytes: 200},
+		{Client: "client-a", BucketStart: BucketStart(first), UpBytes: 110, DownBytes: 210},
+		{Client: "client-a", BucketStart: day.Add(5 * time.Hour).Unix(), UpBytes: 1, DownBytes: 1},
+	}).Error)
+	calc := func(_ context.Context, _ string, start, end time.Time) (BucketResult, error) {
+		result := BucketResult{Usage: map[int64]Usage{}}
+		if start.After(first) {
+			result.HasBaseline = true
+		} else if first.Before(end) {
+			result.FirstRecord = first
+		}
+		for key := start.Unix(); key < end.Unix(); key += BucketSeconds {
+			if key >= BucketStart(first) {
+				result.Usage[key] = Usage{Up: 10, Down: 20}
+			}
+		}
+		return result, nil
+	}
+	resetBucketSkip("client-a")
+	require.NoError(t, ensureBucketRange(context.Background(), db, []string{"client-a"}, day, day.AddDate(0, 0, 1), calc))
+	var rows []models.TrafficBucketLedger
+	require.NoError(t, db.Where("client = ?", "client-a").Order("bucket_start").Find(&rows).Error)
+	require.Len(t, rows, BucketsPerBeijingDay)
+	byStart := map[int64]models.TrafficBucketLedger{}
+	for _, row := range rows {
+		byStart[row.BucketStart] = row
+	}
+	assert.Equal(t, int64(100), byStart[day.Unix()].UpBytes, "incremental row before the first record is kept")
+	assert.Equal(t, int64(110), byStart[BucketStart(first)].UpBytes, "the truncated first-record bucket keeps the incremental value")
+	assert.Zero(t, byStart[day.Add(15*time.Minute).Unix()].UpBytes, "missing early buckets are filled with zero")
+	assert.Equal(t, int64(10), byStart[day.Add(5*time.Hour).Unix()].UpBytes, "buckets after the first record are recomputed")
+	assert.Equal(t, int64(20), byStart[day.Add(24*time.Hour-15*time.Minute).Unix()].DownBytes)
+}
+
+// Today's ended buckets are written on every run; the 23:45 marker never is.
+func TestEnsureTodayBucketsStopsBeforeCurrentBucketAndMarker(t *testing.T) {
+	db := openLedgerTestDB(t, "bucket-ledger-today")
+	require.NoError(t, db.AutoMigrate(&models.TrafficBucketLedger{}))
+	day := time.Date(2026, 7, 1, 0, 0, 0, 0, BeijingLocation)
+	calc := func(_ context.Context, _ string, start, end time.Time) (BucketResult, error) {
+		assert.LessOrEqual(t, end.Sub(start), bucketChunk)
+		result := BucketResult{HasBaseline: true, Usage: map[int64]Usage{}}
+		for key := start.Unix(); key < end.Unix()+3600; key += BucketSeconds {
+			result.Usage[key] = Usage{Up: 1, Down: 2}
+		}
+		return result, nil
+	}
+	require.NoError(t, ensureTodayBuckets(context.Background(), db, []string{"client-a"}, day.Add(10*time.Hour+20*time.Minute), calc))
+	var maxStart int64
+	var n int64
+	require.NoError(t, db.Model(&models.TrafficBucketLedger{}).Count(&n).Error)
+	assert.Equal(t, int64(41), n) // 00:00 .. 10:00
+	require.NoError(t, db.Model(&models.TrafficBucketLedger{}).Select("MAX(bucket_start)").Scan(&maxStart).Error)
+	assert.Equal(t, day.Add(10*time.Hour).Unix(), maxStart)
+
+	require.NoError(t, ensureTodayBuckets(context.Background(), db, []string{"client-a"}, day.Add(24*time.Hour-time.Second), calc))
+	require.NoError(t, db.Model(&models.TrafficBucketLedger{}).Count(&n).Error)
+	assert.Equal(t, int64(BucketsPerBeijingDay-1), n)
+	require.NoError(t, db.Model(&models.TrafficBucketLedger{}).Select("MAX(bucket_start)").Scan(&maxStart).Error)
+	assert.Equal(t, day.Add(24*time.Hour-30*time.Minute).Unix(), maxStart)
 }
 
 func TestMaintainBucketLedgerCleansExpiredAndOrphanRows(t *testing.T) {

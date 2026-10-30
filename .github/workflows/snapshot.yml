@@ -84,7 +84,7 @@ jobs:
         with:
           artifact-name: lite-frontend
           ref: Snapshot
-          theme-ref: local-patches/ping-chart-gaps
+          theme-ref: local-patches/home-globe
 
   test-backend:
     needs: build-frontend

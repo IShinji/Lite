@@ -11,7 +11,7 @@
 | `local-patches/no-self-update` | 禁用后台“立即更新”。原因：官方更新从上游 Release 下载二进制，会覆盖补丁。`DetectCapability` 恒返回 `Supported=false, Reason=local_patch`，服务端更新入口同样被拒；前端据此显示“请自行同步上游并重新构建” | 新增：`pkg/selfupdate/local_patch.go`；小改：`pkg/selfupdate/deployment.go`（`DetectCapability` 开头 4 行） |
 | `local-patches/ci-skip-stale-tests` | `snapshot.yml` 的 `go test` 跳过 3 个上游本身就失败的测试（含写死日期的用例）：`TestGetPingRecordsKeepsRequestedWindowInsideLongerRetention`、`TestRecoveryHoldLearnsOnlyAfterFullCleanWindow`、`TestThemeNodeOmitsForbiddenFieldsForGuestAndAdmin`。上游修好后应去掉 | `.github/workflows/snapshot.yml` 一行 |
 | `local-patches/ping-stats-fix` | 修 `public:getPingMetricStats`：100% 丢包不再返回 `0` 延迟（节点卡片不再显示 0 ms），丢包时 `avg/p50/p99/stddev/min/max/latest` 按成功样本加权，不再被失败探测拉低。**这是 3 个 cherry-pick 的提交，内容与已提交给上游的 PR 相同：https://github.com/nuomiiiii/Lite/pull/7，上游合并后这一层应整层删除** | `web/rpc/jsonrpc/public.metric.go`、`web/rpc/jsonrpc/public_metric_all_lost_test.go` |
-| `local-patches/theme-ref-ping-chart-gaps` | `snapshot.yml` 里 `theme-ref` 从 `main` 改为 `local-patches/ping-chart-gaps`，让构建使用 Lite-theme 的补丁分支（图表区分丢包与无记录，见下表）。**对应上游 PR：https://github.com/nuomiiiii/Lite-theme/pull/1，上游合并后把这一行改回 `main` 并删掉这一层** | `.github/workflows/snapshot.yml` 一行 |
+| `local-patches/theme-ref-home-globe` | `snapshot.yml` 里 `theme-ref` 指向 `local-patches/home-globe`（Lite-theme 的补丁分支：首页可折叠节点地球仪，`ShowHomeGlobe` 开关，默认关）。上游 PR #1（图表区分丢包）已于 2026-10-08 合并，旧的 `local-patches/ping-chart-gaps` 分支与 `theme-ref-ping-chart-gaps` 层已作废（替换为本层） | `.github/workflows/snapshot.yml` |
 
 不要恢复“立即更新”。不要把计费、到期、周期重置、通知、`scheduledexec` 里的北京时间逻辑改成跟随浏览器时区，它们有意保持 Asia/Shanghai。
 
@@ -21,16 +21,16 @@
 | --- | --- | --- | --- |
 | `/Users/wisely/Documents/GitHub/Lite`（后端，本仓库） | `IShinji/Lite` | `nuomiiiii/Lite` | `main` → `browser-tz` → `no-self-update` → `ci-skip-stale-tests` |
 | `/Users/wisely/Documents/GitHub/Lite-web`（管理端前端） | `IShinji/Lite-web` | `nuomiiiii/Lite-web` | `main` → `browser-tz` → `no-self-update`，另有自己的 `CLAUDE.md` |
-| 无本地目录（公开主题，**有 1 个补丁分支**） | `IShinji/Lite-theme` | `nuomiiiii/Lite-theme` | `main` 保持与上游一致；补丁在 `local-patches/ping-chart-gaps` |
+| 无本地目录（公开主题，**有 1 个补丁分支**） | `IShinji/Lite-theme` | `nuomiiiii/Lite-theme` | `main` 保持与上游一致；补丁在 `local-patches/home-globe` |
 
 前端的补丁：仪表盘请求带浏览器时区 `tz`、缓存键按时区隔离、日期标签不再按 `+08:00` 解析、不完整天提示；`local_patch` 时隐藏“立即更新”。
 
-## Lite-theme 补丁分支（`local-patches/ping-chart-gaps`）
+## Lite-theme 补丁分支（`local-patches/home-globe`）
 
-- 内容：`feat/ping-chart-gaps`（即上游 PR 的那个中文提交，图表区分丢包与无记录、新增「采样完整度」列）+ 1 个自己的提交（把主题版本号提到 `1.2.6`）。
-- **为什么要提版本号**：Lite 启动时只在内置主题版本号**数字更大**时才覆盖数据目录里已安装的主题，版本号后缀（如 `-ping1`、`.1`）会被忽略。补丁主题若仍是 `1.2.5`，已安装 `1.2.5` 的实例看不到改动。版本号要在 `Lite-theme.json`、`package.json`（及 `package-lock.json` 根包）、`tests/theme-settings.test.ts` 里写死的断言三处**保持一致**。
-- **同步上游主题时**：先把 fork 的 `main` 快进，再 rebase 补丁分支。版本号那个提交几乎一定会冲突：补丁版本号必须**大于上游当前版本**（取「上游版本 + 1」），否则不会替换已安装的主题。
-- 上游 PR #1 合并后：删掉这个补丁分支、把 `snapshot.yml` 的 `theme-ref` 改回 `main`、删掉 `theme-ref-ping-chart-gaps` 层。已安装的补丁版 `1.2.6` 要等上游主题版本号超过 `1.2.6` 才会被替换，在那之前可在管理端手动重新安装主题。
+- 内容：首页 ServerOverview 下方的可折叠节点地球仪（纯 Canvas、零新依赖；`src/components/FleetGlobe.tsx`、`src/lib/globe-geo.ts` 本地经纬度表、`src/data/land-dots.json` 懒加载点阵），开关 `ShowHomeGlobe`（`Lite-theme.json` configuration，默认关）；主题版本号 = 上游版本 + 1（2026-10-29 基于上游 `1.2.9` → `1.2.10`）。本地工作目录 `~/Documents/GitHub/Lite-theme-globe`（克隆自 fork）。
+- **为什么要提版本号**：Lite 启动时只在内置主题版本号**数字更大**时才覆盖数据目录里已安装的主题，版本号后缀（如 `-ping1`、`.1`）会被忽略。版本号要在 `Lite-theme.json`、`package.json`（及 `package-lock.json` 根包）、`tests/theme-settings.test.ts` 里写死的断言三处**保持一致**。
+- **同步上游主题时**：先把 fork 的 `main` 快进（`gh repo sync IShinji/Lite-theme`），再 rebase 补丁分支。版本号相关提交几乎一定会冲突，补丁版本号必须**大于上游当前版本**（取「上游版本 + 1」）。
+- 历史：旧补丁分支 `local-patches/ping-chart-gaps`（图表区分丢包与无记录）对应的上游 PR #1 已合并，不再需要。
 
 ## 构建与发布机制
 
